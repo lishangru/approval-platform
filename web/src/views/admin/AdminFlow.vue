@@ -57,6 +57,46 @@
       </el-table-column>
     </el-table>
     <p style="color: #909399; font-size: 12px">审批节点对字段默认只读，可在各节点编辑里的"字段权限"中调整。</p>
+
+    <el-divider>发起节点 · 后续逻辑</el-divider>
+    <el-form label-width="110px" style="max-width: 720px">
+      <el-form-item label="路由模式">
+        <el-radio-group v-model="startRoute.useCondition">
+          <el-radio :value="false">顺序（进入第一个审批节点）</el-radio>
+          <el-radio :value="true">条件分支</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <template v-if="startRoute.useCondition">
+        <el-form-item v-for="(c, i) in startRoute.conditions" :key="i" :label="i === 0 ? '条件（且）' : ''" :label-width="i === 0 ? '110px' : '0px'">
+          <div class="cond-row">
+            <el-select v-model="c.key" placeholder="表单字段" size="small" style="width: 190px">
+              <el-option v-for="f in formComponents" :key="f.key" :label="`${f.label}（${f.key}）`" :value="f.key" />
+            </el-select>
+            <el-select v-model="c.op" size="small" style="width: 96px">
+              <el-option label="等于" value="==" /><el-option label="不等于" value="!=" />
+              <el-option label="大于" value=">" /><el-option label="大于等于" value=">=" />
+              <el-option label="小于" value="<" /><el-option label="小于等于" value="<=" />
+            </el-select>
+            <el-input v-model="c.value" size="small" placeholder="比较值" style="width: 130px" />
+            <el-button size="small" text type="danger" @click="startRoute.conditions.splice(i, 1)">删除</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label=" ">
+          <el-button size="small" @click="startRoute.conditions.push({ key: '', op: '==', value: '' })">+ 添加条件</el-button>
+        </el-form-item>
+        <el-form-item label="满足时去向">
+          <el-select v-model="startRoute.whenTo" style="width: 240px">
+            <el-option v-for="n in allNodes" :key="n" :label="nodeName(n)" :value="n" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="兜底去向">
+          <el-select v-model="startRoute.fallback" style="width: 240px">
+            <el-option v-for="n in allNodes" :key="n" :label="nodeName(n)" :value="n" />
+          </el-select>
+        </el-form-item>
+        <p style="color: #909399; font-size: 12px; margin: 0">例：预计时长 ≥ 24 小时 → 直达"学工处审核"；否则 → "部门负责人审批"。</p>
+      </template>
+    </el-form>
   </el-card>
 
   <el-dialog v-model="editVisible" :title="editingIdx >= 0 ? '编辑节点' : '添加节点'" width="760px">
@@ -227,6 +267,11 @@ const taskNodes = computed(() => nodes.value.filter((n) => n.kind === 'userTask'
 const allNodes = computed(() => [...taskNodes.value.map((n) => n.id), 'end']);
 const authRows = ref<{ key: string; label: string; auth: string }[]>([]);
 const startRows = ref<{ key: string; label: string; auth: string }[]>([]);
+const startRoute = reactive({
+  useCondition: false,
+  conditions: [{ key: '', op: '==', value: '' }] as { key: string; op: string; value: string }[],
+  whenTo: 'end', fallback: 'end',
+});
 const groups = computed(() => [...new Set(users.value.map((u) => u.group).filter(Boolean))] as string[]);
 const departments = computed(() => {
   const seen = new Map<number, string>();
@@ -258,6 +303,12 @@ async function loadVersion() {
   const formId = Object.keys(startNode?.draftAuths ?? {})[0];
   const matrix = startNode?.draftAuths?.[formId] ?? {};
   startRows.value = formComponents.value.map((c) => ({ key: c.key, label: c.label, auth: matrix[c.key] ?? 'writable' }));
+  // 发起节点路由
+  const sr = startNode?.routing;
+  startRoute.useCondition = sr?.kind === 'conditional';
+  startRoute.conditions = sr?.kind === 'conditional' ? parseConditions(sr.branches?.[0]?.when) : [{ key: '', op: '==', value: '' }];
+  startRoute.whenTo = sr?.kind === 'conditional' ? (sr.branches?.[0]?.to ?? 'end') : 'end';
+  startRoute.fallback = sr?.kind === 'conditional' ? (sr.fallback ?? 'end') : 'end';
 }
 
 const assigneeName = (row: any) => ({ dept_leader: '部门主管', role: `角色:${row.assignee?.value}`, group: `用户组:${row.assignee?.value}`, fixed: '指定人员', initiator_choose: '发起人指定', initiator: '发起人' }[row.assignee?.kind] ?? '未配置');
@@ -377,11 +428,22 @@ function saveNode() {
 async function saveDraft() {
   const ids = taskNodes.value.map((n) => n.id);
   const formVerId = String(latestFormVerId.value ?? 0);
+  // 发起节点路由：顺序 或 条件分支（低代码条件）
+  let startRouting: any = { kind: 'sequential', next: ids[0] ?? 'end' };
+  if (startRoute.useCondition) {
+    const when = compileConditions(startRoute.conditions);
+    const hasInput = startRoute.conditions.some((c) => c.key && c.value !== '');
+    if (hasInput && !when) return ElMessage.warning('发起条件未填写完整');
+    if (when) {
+      if (!startRoute.whenTo || !startRoute.fallback) return ElMessage.warning('请选择条件分支的去向');
+      startRouting = { kind: 'conditional', branches: [{ when, to: startRoute.whenTo }], fallback: startRoute.fallback };
+    }
+  }
   const built: any[] = [
     {
       id: 'start', kind: 'start', name: '发起', auths: {},
       draftAuths: { [formVerId]: Object.fromEntries(startRows.value.map((r) => [r.key, r.auth])) },
-      routing: { kind: 'sequential', next: ids[0] ?? 'end' },
+      routing: startRouting,
     },
     ...taskNodes.value.map((n, i) => ({
       ...n,
