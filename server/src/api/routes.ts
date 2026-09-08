@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { cstNow } from '../core/time.js';
 import crypto from 'node:crypto';
 import type { WorkflowEngine } from '../domain/flow/engine.js';
 import type { Principal, Json, FieldError } from '../core/types.js';
@@ -770,7 +771,7 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     const { name } = req.body ?? {};
     if (!name) return fail(res, 40001, '请填写密钥用途名称');
     const key = 'ak_' + crypto.randomBytes(24).toString('hex');
-    const row = engine.apikeys.insert({ id: 0, key, name: String(name), status: 'active', createdAt: new Date().toISOString().replace('T', ' ').slice(0, 19), createdBy: P(req).uid });
+    const row = engine.apikeys.insert({ id: 0, key, name: String(name), status: 'active', createdAt: cstNow(), createdBy: P(req).uid });
     ok(res, { id: row.id, name: row.name, key: row.key, status: row.status }); // 完整 key 仅此一次返回
   });
 

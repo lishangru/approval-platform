@@ -1,4 +1,5 @@
 import express from 'express';
+import { cstNow } from './core/time.js';
 import cors from 'cors';
 import multer from 'multer';
 import path from 'node:path';
@@ -52,7 +53,7 @@ app.get('/uploads/:name', authRequired(engine), (req, res) => {
   res.sendFile(file);
 });
 
-app.get('/api/health', (_req, res) => res.json({ e: 0, m: 'ok', d: { time: new Date().toISOString() } }));
+app.get('/api/health', (_req, res) => res.json({ e: 0, m: 'ok', d: { time: cstNow() } }));
 
 // ===== 个人签名图片（每个账号一份）=====
 const sigUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });

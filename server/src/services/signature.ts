@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { cstNow } from '../core/time.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +65,7 @@ export function setSignature(uid: number, buf: Buffer, format: 'png' | 'jpg', us
   const info: SignatureMeta = {
     hash,
     format,
-    updatedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    updatedAt: cstNow(),
     sealSig: bound?.signature ?? '',
     sealFingerprint: bound?.fingerprint ?? '',
   };

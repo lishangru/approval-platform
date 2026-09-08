@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { cstNow } from '../core/time.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +65,7 @@ export function ensureSeal(name: string, number: string, uid: number): { p12: Bu
     serial: cert.serialNumber,
     fingerprint: crypto.createHash('sha256').update(Buffer.from(derCert, 'binary')).digest('hex'),
     passphrase,
-    createdAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    createdAt: cstNow(),
   };
   fs.writeFileSync(meta, JSON.stringify(info, null, 1));
   return { p12: fs.readFileSync(p12), info };
@@ -113,6 +114,6 @@ export function signWithSeal(uid: number, content: string): SealResult | null {
     subject: info.subject,
     serial: info.serial,
     fingerprint: info.fingerprint,
-    signedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    signedAt: cstNow(),
   };
 }
