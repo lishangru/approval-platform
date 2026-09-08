@@ -11,24 +11,47 @@
     <el-table-column label="流程版本" width="110">
       <template #default="{ row }">{{ flowVer(row) || '未发布' }}</template>
     </el-table-column>
-    <el-table-column label="操作" width="330" fixed="right">
+    <el-table-column label="可见范围" width="150">
+      <template #default="{ row }">
+        <el-tag size="small" :type="row.visibility ? 'warning' : 'info'">{{ visLabel(row.visibility) }}</el-tag>
+      </template>
+    </el-table-column>
+    <el-table-column label="操作" width="390" fixed="right">
       <template #default="{ row }">
         <el-button size="small" @click="$router.push('/admin/form/' + row.id)">表单设计</el-button>
         <el-button size="small" @click="$router.push('/admin/flow/' + row.id)">流程设计</el-button>
-        <el-button size="small" @click="$router.push('/admin/data/' + row.id)">数据查询</el-button>
+        <el-button size="small" @click="$router.push('/admin/data/' + row.id)">数据</el-button>
+        <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="success" plain :disabled="!row.formVersionId || !row.flowVersionId" @click="openPublish(row)">发布上线</el-button>
       </template>
     </el-table-column>
   </el-table>
 
-  <el-dialog v-model="createVisible" title="新建事项" width="460px">
+  <el-dialog v-model="createVisible" title="新建事项" width="520px">
     <el-form label-width="80px">
       <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
       <el-form-item label="描述"><el-input v-model="form.desc" type="textarea" /></el-form-item>
+      <el-form-item label="可见范围">
+        <ScopeEditor v-model:kind="form.visKind" v-model:value="form.visValue" :users="users" :groups="groups" :departments="departments" />
+      </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="createVisible = false">取消</el-button>
       <el-button type="primary" @click="create">创建</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="editVisible" title="编辑事项" width="520px">
+    <el-form label-width="80px">
+      <el-form-item label="名称"><el-input v-model="editForm.name" /></el-form-item>
+      <el-form-item label="描述"><el-input v-model="editForm.desc" type="textarea" /></el-form-item>
+      <el-form-item label="可见范围">
+        <ScopeEditor v-model:kind="editForm.visKind" v-model:value="editForm.visValue" :users="users" :groups="groups" :departments="departments" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="editVisible = false">取消</el-button>
+      <el-button type="primary" @click="saveEdit">保存</el-button>
     </template>
   </el-dialog>
 
@@ -65,13 +88,19 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { api } from '../../api';
+import ScopeEditor from '../../components/ScopeEditor.vue';
 
 const apps = ref<any[]>([]);
+const users = ref<any[]>([]);
+const departments = ref<any[]>([]);
+const groups = computed(() => [...new Set(users.value.map((u) => u.group).filter(Boolean))] as string[]);
 const createVisible = ref(false);
-const form = reactive({ name: '', desc: '' });
+const form = reactive({ name: '', desc: '', visKind: 'all', visValue: undefined as any });
+const editVisible = ref(false);
+const editForm = reactive({ id: 0, name: '', desc: '', visKind: 'all', visValue: undefined as any });
 const publishVisible = ref(false);
 const pubForms = ref<any[]>([]);
 const pubFlows = ref<any[]>([]);
@@ -82,17 +111,42 @@ const pubAllowForce = ref(false);
 const pubAllowForceMode = ref<'apply' | 'keep'>('apply');
 
 const refresh = async () => { apps.value = await api('get', '/system/app'); };
-onMounted(refresh);
+onMounted(async () => {
+  refresh();
+  users.value = await api('get', '/system/users');
+  departments.value = await api('get', '/system/departments');
+});
 
 const formVer = (row: any) => (row.formVersionId ? `#${row.formVersionId}` : '');
 const flowVer = (row: any) => (row.flowVersionId ? `#${row.flowVersionId}` : '');
+const visLabel = (v: any) => {
+  if (!v || v.kind === 'all') return '全部人员';
+  return ({ role: `角色:${v.value}`, group: `用户组:${v.value}`, department: `部门ID:${v.value}`, fixed: `指定${(v.value as number[]).length}人` } as any)[v.kind] ?? '自定义';
+};
+const buildVisibility = (kind: string, value: any) => (kind === 'all' || !value || (Array.isArray(value) && !value.length) || value === '' ? undefined : { kind, value });
 
 async function create() {
   if (!form.name) return ElMessage.warning('请填写名称');
-  await api('post', '/system/app', { name: form.name, desc: form.desc });
+  await api('post', '/system/app', { name: form.name, desc: form.desc, visibility: buildVisibility(form.visKind, form.visValue) });
   ElMessage.success('已创建，请分别设计表单与流程后发布');
   createVisible.value = false;
-  form.name = ''; form.desc = '';
+  Object.assign(form, { name: '', desc: '', visKind: 'all', visValue: undefined });
+  refresh();
+}
+
+function openEdit(row: any) {
+  Object.assign(editForm, {
+    id: row.id, name: row.name, desc: row.desc,
+    visKind: row.visibility?.kind ?? 'all', visValue: row.visibility?.value,
+  });
+  editVisible.value = true;
+}
+
+async function saveEdit() {
+  if (!editForm.name) return ElMessage.warning('请填写名称');
+  await api('put', `/system/app/${editForm.id}`, { name: editForm.name, desc: editForm.desc, visibility: buildVisibility(editForm.visKind, editForm.visValue) });
+  ElMessage.success('已保存');
+  editVisible.value = false;
   refresh();
 }
 

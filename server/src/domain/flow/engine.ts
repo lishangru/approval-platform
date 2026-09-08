@@ -18,7 +18,10 @@ export interface UserRow {
 export interface RoleRow { id: number; key: string; name: string; desc: string; builtin: boolean }
 export interface DeptRow { id: number; deptId: number; name: string }
 export interface ApiKeyRow { id: number; key: string; name: string; status: 'active' | 'revoked'; createdAt: string; createdBy: number }
-export interface AppRow { id: number; name: string; desc: string; icon: string; formVersionId: number | null; flowVersionId: number | null }
+export interface AppRow {
+  id: number; name: string; desc: string; icon: string; formVersionId: number | null; flowVersionId: number | null;
+  visibility?: { kind: 'all' | 'role' | 'group' | 'department' | 'fixed'; value?: any };  // 可见/可办理范围（默认全部）
+}
 export interface FormRow { id: number; appId: number; version: string; status: 'draft' | 'published'; snapshot: { components: FormSnapshot['components'] } }
 export interface FlowRow { id: number; appId: number; version: string; status: 'draft' | 'published'; snapshot: { nodes: FlowNode[]; variables: FlowSnapshot['variables'] } }
 

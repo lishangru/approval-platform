@@ -166,16 +166,32 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     ok(res, engine.users.all().filter((u) => u.status !== 'disabled').map((u) => ({ id: u.id, name: u.name, number: u.number, department: u.department, group: u.group ?? '' })));
   });
 
-  // 事项大厅
-  r.get('/site/apps', (_req, res) => {
-    const apps = engine.apps.all().map((a) => ({ id: a.id, name: a.name, desc: a.desc, icon: a.icon, published: Boolean(a.formVersionId && a.flowVersionId) }));
+  // 事项大厅（按可见范围过滤；管理员可见全部）
+  r.get('/site/apps', (req, res) => {
+    const p = P(req);
+    const isAdmin = p.roles.includes('admin');
+    const apps = engine.apps.all()
+      .filter((a) => isAdmin || inScope({ id: p.uid, roles: p.roles, group: p.group, departmentId: p.departmentId }, a.visibility))
+      .map((a) => ({ id: a.id, name: a.name, desc: a.desc, icon: a.icon, published: Boolean(a.formVersionId && a.flowVersionId) }));
     ok(res, apps);
   });
+
+  // 可见范围校验（start-info / launch 共用）
+  const checkVisible = (req: Request, res: Response, app: { visibility?: any }): boolean => {
+    const p = P(req);
+    if (p.roles.includes('admin')) return true;
+    if (!inScope({ id: p.uid, roles: p.roles, group: p.group, departmentId: p.departmentId }, app.visibility)) {
+      fail(res, 40300, '您没有该事项的办理权限（不在可见范围内）');
+      return false;
+    }
+    return true;
+  };
 
   // 发起：事项详情（表单+起点权限+是否需指定审批人）
   r.get('/site/app/:id/start-info', (req, res) => {
     const app = engine.apps.find((a) => a.id === num(req.params.id));
     if (!app?.formVersionId || !app?.flowVersionId) return fail(res, 40404, '事项未发布');
+    if (!checkVisible(req, res, app)) return;
     const form = engine.forms.find((f) => f.id === app.formVersionId)!;
     const flow = engine.flows.find((f) => f.id === app.flowVersionId)!;
     const start = flow.snapshot.nodes.find((n) => n.kind === 'start')!;
@@ -201,6 +217,9 @@ export function buildRoutes(engine: WorkflowEngine): Router {
   r.post('/site/instance/launch', (req, res) => {
     try {
       const { appId, data, vars, nextAssignees } = req.body ?? {};
+      const app = engine.apps.find((a) => a.id === num(appId));
+      if (!app) return fail(res, 40404, '事项不存在');
+      if (!checkVisible(req, res, app)) return;
       const inst = engine.launch(P(req), { appId: num(appId), data: data ?? {}, vars: vars ?? {}, nextAssignees: (nextAssignees ?? []).map(num) });
       ok(res, { instanceId: inst.id, status: inst.status });
     } catch (e: any) {
@@ -702,10 +721,28 @@ export function buildRoutes(engine: WorkflowEngine): Router {
 
   r.get('/system/app', (_req, res) => ok(res, engine.apps.all()));
   r.post('/system/app', (req, res) => {
-    const { name, desc = '', icon = '' } = req.body ?? {};
+    const { name, desc = '', icon = '', visibility } = req.body ?? {};
     if (!name) return fail(res, 40001, '事项名称必填');
-    ok(res, engine.apps.insert({ id: 0, name, desc, icon, formVersionId: null, flowVersionId: null }));
+    ok(res, engine.apps.insert({ id: 0, name, desc, icon, formVersionId: null, flowVersionId: null, visibility: validVisibility(visibility) }));
   });
+  r.put('/system/app/:id', (req, res) => {
+    const app = engine.apps.find((a) => a.id === num(req.params.id));
+    if (!app) return fail(res, 40404, '事项不存在');
+    const b = req.body ?? {};
+    const patch: any = {};
+    if (b.name !== undefined) patch.name = String(b.name);
+    if (b.desc !== undefined) patch.desc = String(b.desc);
+    if (b.icon !== undefined) patch.icon = String(b.icon);
+    if (b.visibility !== undefined) patch.visibility = validVisibility(b.visibility);
+    engine.apps.update((a) => a.id === app.id, patch);
+    ok(res, engine.apps.find((a) => a.id === app.id));
+  });
+  const validVisibility = (v: any) => {
+    if (!v || v.kind === 'all' || !v.kind) return undefined;
+    if (!['role', 'group', 'department', 'fixed'].includes(v.kind)) return undefined;
+    if (v.value === '' || v.value === undefined || (Array.isArray(v.value) && !v.value.length)) return undefined;
+    return { kind: v.kind, value: v.kind === 'department' ? Number(v.value) : v.kind === 'fixed' ? (v.value as number[]).map(Number) : String(v.value) };
+  };
   r.post('/system/app/:id/publish', (req, res) => {
     const app = engine.apps.find((a) => a.id === num(req.params.id));
     if (!app) return fail(res, 40404, '事项不存在');
