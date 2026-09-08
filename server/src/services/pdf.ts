@@ -9,6 +9,7 @@ import { plainAddPlaceholder } from '@signpdf/placeholder-plain';
 import { SignPdf } from '@signpdf/signpdf';
 import { P12Signer } from '@signpdf/signer-p12';
 import { SUBFILTER_ADOBE_PKCS7_DETACHED } from '@signpdf/utils';
+import { timestampPdf, KNOWN_TSA_URLS } from 'pdf-rfc3161';
 import { evaluate } from '../domain/flow/expr.js';
 import { sealPaths, getSealInfo } from './seal.js';
 import { verifiedSignature } from './signature.js';
@@ -271,6 +272,8 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
       draw(`签名图片：${l.actorName}（SHA-256 ${sig.hash.slice(0, 16)}…，已验签）`, M + 10, 9);
     }
   }
+  y -= 2;
+  draw('可信时间戳：文件末尾附有由时间戳机构（TSA）签发的 RFC3161 DocTimeStamp，证明本文件在导出时刻已完整存在，此后任何改动都会使时间戳失效。', M, 9);
 
   // —— 签名链：逐级叠加个人签章（先处理人的先签），系统签章最后封口 ——
   const signer = new SignPdf();
@@ -304,5 +307,18 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     signatureLength: 8192,
     subFilter: SUBFILTER_ADOBE_PKCS7_DETACHED,
   }) as Buffer<ArrayBuffer>;
-  return signer.sign(buffer, p12Cert);
+  const signed = await signer.sign(buffer, p12Cert);
+
+  // —— RFC3161 可信时间戳（TSA 签发，证明文件在导出时刻已存在；TSA_URL 可换成生产 TSA）——
+  try {
+    const ts = await timestampPdf({
+      pdf: Buffer.from(signed),
+      tsa: { url: process.env.TSA_URL ?? KNOWN_TSA_URLS.FREETSA },
+      enableLTV: true,
+    });
+    return Buffer.from(ts.pdf);
+  } catch (err) {
+    console.error('[pdf] 时间戳签发失败（不影响签名，跳过）:', (err as Error).message);
+    return signed;
+  }
 }
