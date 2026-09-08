@@ -11,6 +11,7 @@ import { buildRoutes, fail, ok } from './api/routes.js';
 import { authRequired } from './services/auth.js';
 import { seedIfEmpty } from './seed.js';
 import { registerSubscribers } from './services/notify.js';
+import { setSignature, getSignatureInfo, clearSignature, readSignatureImage } from './services/signature.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,6 +53,42 @@ app.get('/uploads/:name', authRequired(engine), (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => res.json({ e: 0, m: 'ok', d: { time: new Date().toISOString() } }));
+
+// ===== 个人签名图片（每个账号一份）=====
+const sigUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
+
+app.post('/api/mysignature', authRequired(engine), sigUpload.single('file'), (req, res) => {
+  const f = req.file;
+  if (!f) return fail(res, 40001, '未收到图片');
+  const isPng = f.buffer.subarray(0, 4).toString('hex') === '89504e47';
+  const isJpg = f.buffer.subarray(0, 3).toString('hex') === 'ffd8ff';
+  if (!isPng && !isJpg) return fail(res, 40001, '仅支持 PNG / JPG 图片');
+  const p = (req as any).principal;
+  const u = engine.users.find((x) => x.id === p.uid);
+  if (!u) return fail(res, 40404, '用户不存在');
+  const info = setSignature(p.uid, f.buffer, isPng ? 'png' : 'jpg', { name: u.name, number: u.number });
+  ok(res, { hash: info.hash, format: info.format, updatedAt: info.updatedAt });
+});
+
+app.get('/api/mysignature', authRequired(engine), (req, res) => {
+  const p = (req as any).principal;
+  const info = getSignatureInfo(p.uid);
+  ok(res, { has: Boolean(info), hash: info?.hash ?? '', format: info?.format ?? '', updatedAt: info?.updatedAt ?? '', sealFingerprint: info?.sealFingerprint ?? '' });
+});
+
+app.get('/api/mysignature/image', authRequired(engine), (req, res) => {
+  const p = (req as any).principal;
+  const img = readSignatureImage(p.uid);
+  if (!img) return fail(res, 40404, '尚未设置签名');
+  res.setHeader('Content-Type', img.format === 'png' ? 'image/png' : 'image/jpeg');
+  res.send(img.buffer);
+});
+
+app.delete('/api/mysignature', authRequired(engine), (req, res) => {
+  const p = (req as any).principal;
+  clearSignature(p.uid);
+  ok(res);
+});
 app.use(buildRoutes(engine));
 
 // 统一错误兜底

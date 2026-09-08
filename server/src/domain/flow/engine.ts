@@ -9,6 +9,7 @@ import { assigneeRegistry, type AssigneeCtx } from './assignees.js';
 import { routingRegistry } from './routing.js';
 import { actionRegistry, type DealInput } from './actions.js';
 import { ensureSeal, getSealInfo, signWithSeal } from '../../services/seal.js';
+import { signatureBinding } from '../../services/signature.js';
 
 export interface UserRow {
   id: number; username: string; passHash: string; salt: string;
@@ -389,6 +390,7 @@ export class WorkflowEngine {
       const content = JSON.stringify({
         instanceId: log.instanceId, taskId: log.taskId, nodeId: log.nodeId, nodeName: log.nodeName,
         action: log.action, comment: log.comment, attachments: log.attachments, createdAt: log.createdAt,
+        signatureImg: signatureBinding(log.actorUid),
       });
       const u = this.users.all().find((x) => x.id === log.actorUid);
       if (!u) return;
@@ -402,10 +404,10 @@ export class WorkflowEngine {
     }
   }
 
-  // 补签：为实例中缺签章的审批日志补盖签章（导出 PDF 前调用）
+  // 补签/刷新：为实例的审批日志（重新）加盖个人签章（含最新签名图片绑定），导出 PDF 前调用
   ensureInstanceSeals(instanceId: number) {
-    const unstamped = this.logs.filter((l) => l.instanceId === instanceId && !(l.snapshot as any)?.seal && !['知会', '催办'].includes(l.action));
-    for (const log of unstamped) this.stampLog(log);
+    const stampable = this.logs.filter((l) => l.instanceId === instanceId && !['知会', '催办'].includes(l.action));
+    for (const log of stampable) this.stampLog(log);
   }
 
   private checkDealInput(input: DealInput, actionSpec: { opinionRequired?: boolean; attachmentRequired?: boolean } | null): Error | null {

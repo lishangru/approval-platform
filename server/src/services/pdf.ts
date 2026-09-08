@@ -11,6 +11,7 @@ import { P12Signer } from '@signpdf/signer-p12';
 import { SUBFILTER_ADOBE_PKCS7_DETACHED } from '@signpdf/utils';
 import { evaluate } from '../domain/flow/expr.js';
 import { sealPaths, getSealInfo } from './seal.js';
+import { verifiedSignature } from './signature.js';
 import type { WorkflowEngine } from '../domain/flow/engine.js';
 import type { Instance } from '../core/types.js';
 
@@ -142,9 +143,12 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     ['当前节点', inst.currentNodes.map((n) => flow.nodes.find((x) => x.id === n.nodeId)?.name ?? n.nodeId).join('、') || '—'],
     ['完成时间', inst.finishedAt ?? '—'],
   ];
-  // 表格式绘制
-  const drawTable = (headers: string[], colWidths: number[], rows: { lines: string[][]; raw?: any }[]) => {
-    const rowH = (lines: string[][]) => Math.max(...lines.map((l) => l.length)) * 13 + 10;
+  const IMG_TOKEN = '\u0000IMG';
+  // 表格式绘制（单元格支持嵌图：lines 中的 IMG_TOKEN 由 row.imgs 提供图片）
+  const imgCache = new Map<string, any>();
+  const drawTable = async (headers: string[], colWidths: number[], rows: { lines: string[][]; raw?: any; imgs?: Record<number, { buffer: Buffer; kind: 'png' | 'jpg' }> }[]) => {
+    const lineH = (line: string) => (line === IMG_TOKEN ? 32 : 13);
+    const rowH = (lines: string[][]) => Math.max(...lines.map((l) => l.reduce((s, line) => s + lineH(line), 0))) + 10;
     const headH = 20;
     newPageIfNeeded(headH + 30);
     // header
@@ -160,14 +164,30 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
       newPageIfNeeded(h + 8);
       if (y - h < M) { page = pdfDoc.addPage([PAGE_W, 842]); y = 800; }
       x = M;
-      row.lines.forEach((lines, i) => {
+      for (let i = 0; i < row.lines.length; i++) {
+        const lines = row.lines[i];
         let ty = y - 13;
         for (const line of lines) {
-          page.drawText(line, { x: x + 6, y: ty, size: 9, font, color: rgb(0.13, 0.13, 0.13) });
-          ty -= 13;
+          if (line === IMG_TOKEN && row.imgs?.[i]) {
+            const { buffer, kind } = row.imgs[i];
+            const cacheKey = kind + ':' + crypto.createHash('sha1').update(buffer).digest('hex');
+            let img = imgCache.get(cacheKey);
+            if (!img) {
+              img = kind === 'png' ? await pdfDoc.embedPng(buffer) : await pdfDoc.embedJpg(buffer);
+              imgCache.set(cacheKey, img);
+            }
+            const maxW = colWidths[i] - 12, maxH = 26;
+            const scale = Math.min(maxW / img.width, maxH / img.height);
+            const dw = img.width * scale, dh = img.height * scale;
+            page.drawImage(img, { x: x + 6, y: ty - dh + 13, width: dw, height: dh });
+            ty -= 32;
+          } else {
+            page.drawText(line, { x: x + 6, y: ty, size: 9, font, color: rgb(0.13, 0.13, 0.13) });
+            ty -= 13;
+          }
         }
         x += colWidths[i];
-      });
+      }
       // 边框
       page.drawRectangle({ x: M, y: y - h, width: CONTENT_W, height: h, borderColor: rgb(0.75, 0.78, 0.82), borderWidth: 0.8 });
       let bx = M;
@@ -177,7 +197,7 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     }
   };
 
-  drawTable(['项目', '内容'], [110, CONTENT_W - 110], meta.map(([k, v]) => ({ lines: [cell(k, 110), cell(v, CONTENT_W - 110)] })));
+  await drawTable(['项目', '内容'], [110, CONTENT_W - 110], meta.map(([k, v]) => ({ lines: [cell(k, 110), cell(v, CONTENT_W - 110)] })));
   y -= 16;
 
   // —— 表单内容（按条件显隐过滤：被联动隐藏的字段不出现在申请单上）——
@@ -193,7 +213,7 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     }
     return { lines: [cell(c.label, 130), cell(t, CONTENT_W - 130)] };
   });
-  drawTable(['字段', '填写内容'], [130, CONTENT_W - 130], formRows);
+  await drawTable(['字段', '填写内容'], [130, CONTENT_W - 130], formRows);
   y -= 16;
 
   // —— 审批意见（一级一行，时间 hh:mm:ss 换行显示）——
@@ -216,9 +236,15 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     }
     const seal = (l.snapshot as any)?.seal as any;
     if (seal?.fingerprint) text += `\n个人签章：${seal.subject}（证书指纹 ${String(seal.fingerprint).slice(0, 16)}…，已验签）`;
-    return { lines: [cell(l.nodeName, 90), cell(l.actorName, 70), cell(l.action, 70), cell(text, CONTENT_W - 90 - 70 - 70 - 80), cell(splitTime(l.createdAt), 80)] };
+    // 处理人格：本人设置了签名图片（且完整性/证书绑定校验通过）时，格内显示签名图
+    const sig = verifiedSignature(l.actorUid);
+    const nameLines = cell(l.actorName, 70);
+    const imgs: Record<number, { buffer: Buffer; kind: 'png' | 'jpg' }> | undefined = sig
+      ? { 1: { buffer: sig.buffer, kind: sig.format } } : undefined;
+    const handlerLines = sig ? [...nameLines, IMG_TOKEN, ...cell(`签名图已验签（${sig.hash.slice(0, 12)}…）`, 70)] : nameLines;
+    return { lines: [cell(l.nodeName, 90), handlerLines, cell(l.action, 70), cell(text, CONTENT_W - 90 - 70 - 70 - 80), cell(splitTime(l.createdAt), 80)], imgs };
   });
-  drawTable(['节点', '处理人', '操作', '意见/附件', '时间'], [90, 70, 70, CONTENT_W - 90 - 70 - 70 - 80, 80], opinionRows.length ? opinionRows : [{ lines: [cell('—', 90), cell('—', 70), cell('—', 70), cell('尚无审批记录', CONTENT_W - 310), cell('—', 80)] }]);
+  await drawTable(['节点', '处理人', '操作', '意见/附件', '时间'], [90, 70, 70, CONTENT_W - 90 - 70 - 70 - 80, 80], opinionRows.length ? opinionRows : [{ lines: [cell('—', 90), cell('—', 70), cell('—', 70), cell('尚无审批记录', CONTENT_W - 310), cell('—', 80)] }]);
   y -= 20;
 
   // —— 数字签名说明 ——
@@ -235,6 +261,11 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
   for (const l of sealedLogs) {
     const seal = (l.snapshot as any).seal;
     draw(`已签名：${seal.subject}（时间 ${seal.signedAt}，指纹 ${String(seal.fingerprint).slice(0, 16)}…）`, M + 10, 9);
+  }
+  y -= 2;
+  const imgBoundLogs = opinionLogs.filter((l) => verifiedSignature(l.actorUid));
+  if (imgBoundLogs.length) {
+    draw(`签名图片认证：${imgBoundLogs.length} 位处理人在 PDF 中显示了个人签名图片，每张图片的 SHA-256 指纹已用其个人证书做 PKCS#7 签名绑定（记录于审批日志的数字签章中），图片被篡改将导致验签失败。`, M, 9);
   }
 
   // —— 签名链：逐级叠加个人签章（先处理人的先签），系统签章最后封口 ——
