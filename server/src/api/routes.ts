@@ -6,7 +6,7 @@ import { formEngine } from '../domain/form/engine.js';
 import { evaluate } from '../domain/flow/expr.js';
 import { assigneeRegistry, inScope } from '../domain/flow/assignees.js';
 import { localAuth, authRequired, requireRole, requireTotp, hashPassword, makeSalt, signToken } from '../services/auth.js';
-import { ensureSigningP12, generateInstancePdf } from '../services/pdf.js';
+import { ensureSigningP12, generateInstancePdf, sha256File } from '../services/pdf.js';
 import { getSealInfo, resetSeal } from '../services/seal.js';
 import path from 'node:path';
 import { oauthConfig, createState, checkState, buildAuthorizeUrl, exchangeCode, fetchUserinfo, matchLocalUser } from '../services/oauth.js';
@@ -361,8 +361,22 @@ export function buildRoutes(engine: WorkflowEngine): Router {
       const dealt = engine.logs.find((l) => l.instanceId === inst.id && l.actorUid === p.uid);
       if (!hasTask && !dealt) return fail(res, 40300, '无权查看');
     }
-    const flow = engine.flowOf(inst);
-    const form = engine.formOf(inst);
+      const flow = engine.flowOf(inst);
+      const form = engine.formOf(inst);
+      const fileHash = (f: any) => ({ ...f, hash: sha256File(path.join(process.cwd(), 'uploads', path.basename(String(f.url ?? '')))) });
+      const withHash = (files: any) => Array.isArray(files) ? files.map(fileHash) : fileHash(files);
+      // 表单文件值补 hash、日志附件补 hash（供详情页展示 文件名/地址/SHA-256）
+      const fileKeys = new Set(form.components.filter((c) => c.type === 'file').map((c) => c.key));
+      const dataWithHash: any = { ...inst.data };
+      for (const k of fileKeys) {
+        const v = (inst.data as any)[k];
+        if (!v) continue;
+        dataWithHash[k] = withHash(v);
+      }
+      const logsWithHash = engine.logs
+        .filter((l) => l.instanceId === inst.id)
+        .sort((a, b) => a.id - b.id)
+        .map((l) => (l.attachments?.length ? { ...l, attachments: withHash(l.attachments as any) } : l));
     const activeTaskIds = new Set(inst.currentNodes.flatMap((n) => n.taskIds));
     // 条件表达式 -> 人类可读描述（用表单字段标题）
     const describeExpr = (e: any): string => {
@@ -455,8 +469,8 @@ export function buildRoutes(engine: WorkflowEngine): Router {
           .filter((u) => inScope({ id: u.id, roles: u.roles, group: u.group, departmentId: u.departmentId }, cn.assignee!.scope))
           .map((u) => ({ id: u.id, name: u.name, department: u.department, group: u.group ?? '' }));
       })(),
-      form: { components: formEngine.applyAuth({ components: form.components }, {}, { data: inst.data }), data: inst.data },
-      logs: engine.logs.filter((l) => l.instanceId === inst.id).sort((a, b) => a.id - b.id),
+      form: { components: formEngine.applyAuth({ components: form.components }, {}, { data: inst.data }), data: dataWithHash },
+      logs: logsWithHash,
       activeTaskIds: [...activeTaskIds],
     });
   });

@@ -8,8 +8,14 @@
       >
         <!-- 只读展示 -->
         <template v-if="!editable(c)">
-          <span v-if="c.type === 'file' && Array.isArray(data[c.key]) && data[c.key].length" class="file-links">
-            <a v-for="(f, fi) in data[c.key]" :key="fi" :href="f.url" target="_blank">📎 {{ f.name }}</a>
+          <span v-if="c.type === 'file' && data[c.key] && (Array.isArray(data[c.key]) ? data[c.key].length : true)" class="file-links">
+            <div v-for="(f, fi) in (Array.isArray(data[c.key]) ? data[c.key] : [data[c.key]])" :key="fi" class="file-item">
+              <a :href="f.url" target="_blank">📎 {{ f.name }}</a>
+              <div class="file-meta">
+                <div>地址：<code>{{ f.url }}</code></div>
+                <div v-if="f.hash">SHA-256：<code>{{ f.hash }}</code></div>
+              </div>
+            </div>
           </span>
           <span v-else class="ro-value">{{ display(c, data[c.key]) }}</span>
         </template>
@@ -183,6 +189,9 @@ function evalExpr(expr: any): boolean {
 <style scoped>
 .ro-value { color: #303133; font-size: 14px; }
 .upload-tip { color: #909399; font-size: 12px; margin-top: 4px; }
-.file-links { display: flex; flex-direction: column; gap: 4px; }
+.file-links { display: flex; flex-direction: column; gap: 8px; }
 .file-links a { color: #409eff; text-decoration: none; font-size: 13px; }
+.file-item { display: flex; flex-direction: column; gap: 2px; }
+.file-meta { color: #909399; font-size: 12px; line-height: 1.6; }
+.file-meta code { word-break: break-all; color: #67c23a; }
 </style>

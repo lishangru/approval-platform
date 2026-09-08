@@ -69,7 +69,7 @@ function wrapText(text: string, font: any, size: number, maxWidth: number): stri
   return lines;
 }
 
-function sha256File(file: string): string {
+export function sha256File(file: string): string {
   if (!fs.existsSync(file)) return '（文件缺失）';
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
