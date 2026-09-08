@@ -241,7 +241,7 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     const nameLines = cell(l.actorName, 70);
     const imgs: Record<number, { buffer: Buffer; kind: 'png' | 'jpg' }> | undefined = sig
       ? { 1: { buffer: sig.buffer, kind: sig.format } } : undefined;
-    const handlerLines = sig ? [...nameLines, IMG_TOKEN, ...cell(`签名图已验签（${sig.hash.slice(0, 12)}…）`, 70)] : nameLines;
+    const handlerLines = sig ? [...nameLines, IMG_TOKEN] : nameLines;
     return { lines: [cell(l.nodeName, 90), handlerLines, cell(l.action, 70), cell(text, CONTENT_W - 90 - 70 - 70 - 80), cell(splitTime(l.createdAt), 80)], imgs };
   });
   await drawTable(['节点', '处理人', '操作', '意见/附件', '时间'], [90, 70, 70, CONTENT_W - 90 - 70 - 70 - 80, 80], opinionRows.length ? opinionRows : [{ lines: [cell('—', 90), cell('—', 70), cell('—', 70), cell('尚无审批记录', CONTENT_W - 310), cell('—', 80)] }]);
@@ -265,7 +265,11 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
   y -= 2;
   const imgBoundLogs = opinionLogs.filter((l) => verifiedSignature(l.actorUid));
   if (imgBoundLogs.length) {
-    draw(`签名图片认证：${imgBoundLogs.length} 位处理人在 PDF 中显示了个人签名图片，每张图片的 SHA-256 指纹已用其个人证书做 PKCS#7 签名绑定（记录于审批日志的数字签章中），图片被篡改将导致验签失败。`, M, 9);
+    draw(`签名图片认证：以下处理人在表中显示了个人签名图片，每张图片的 SHA-256 指纹已用其个人证书做 PKCS#7 签名绑定（记录于审批日志的数字签章中），图片被篡改将导致验签失败。`, M, 9);
+    for (const l of imgBoundLogs) {
+      const sig = verifiedSignature(l.actorUid)!;
+      draw(`签名图片：${l.actorName}（SHA-256 ${sig.hash.slice(0, 16)}…，已验签）`, M + 10, 9);
+    }
   }
 
   // —— 签名链：逐级叠加个人签章（先处理人的先签），系统签章最后封口 ——
