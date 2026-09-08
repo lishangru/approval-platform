@@ -357,13 +357,22 @@ export function buildRoutes(engine: WorkflowEngine): Router {
         edges.push({ from: n.id, to: r.fallback ?? 'end', label: '否则' });
       }
     }
+    // 节点状态：按该节点最后一次审批动作判定（而非实例终态）
+    const nodeState = (n: import('../core/types.js').FlowNode): string => {
+      if (n.kind === 'end') return inst.status === 'finished' ? 'done' : inst.status === 'rejected' ? 'rejected' : 'pending';
+      if (inst.currentNodes.some((c) => c.nodeId === n.id)) return 'current';
+      if (!inst.history.some((h) => h.nodeId === n.id)) return 'pending';
+      const dealt = engine.tasks
+        .filter((t) => t.instanceId === inst.id && t.nodeId === n.id && t.status === 'dealt' && Boolean(t.dealtAction))
+        .sort((a, b) => b.id - a.id)[0];
+      if (!dealt) return 'done';
+      return ['reject', 'force-reject', 'sign-reject'].includes(dealt.dealtAction!) ? 'rejected' : 'done';
+    };
     ok(res, {
       instance: { id: inst.id, name: inst.appSnapshot.name, status: inst.status, progress: inst.progress, createdAt: inst.createdAt, finishedAt: inst.finishedAt ?? null, vars: inst.vars },
       flow: {
         version: flow.version,
         nodes: flow.nodes.map((n) => {
-          const inHistory = inst.history.some((h) => h.nodeId === n.id);
-          const isCurrent = inst.currentNodes.some((c) => c.nodeId === n.id);
           const handled = [...new Set(engine.logs
             .filter((l) => l.instanceId === inst.id && l.nodeId === n.id && l.actorUid !== inst.createdBy)
             .map((l) => l.actorName))];
@@ -372,9 +381,7 @@ export function buildRoutes(engine: WorkflowEngine): Router {
             .map((uid) => engine.findUser(uid)?.name).filter(Boolean) as string[])];
           return {
             id: n.id, name: n.kind === 'start' ? '发起' : n.name, kind: n.kind,
-            state: n.kind === 'end'
-              ? (inst.status === 'finished' ? 'done' : inst.status === 'rejected' ? 'rejected' : 'pending')
-              : isCurrent ? 'current' : inHistory ? (inst.status === 'rejected' ? 'rejected' : 'done') : 'pending',
+            state: nodeState(n),
             allowForce: Boolean(n.allowForce),
             handlers: handled,
             candidates: waiting,
