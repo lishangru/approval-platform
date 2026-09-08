@@ -280,11 +280,16 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     ok(res);
   });
 
-  // 签批页：任务上下文
+  // 签批页：任务上下文（打开即视为已领取：锁定下级审批的自我修正窗口）
   r.get('/site/task/:id/deal-info', (req, res) => {
+    const p = P(req);
     const t = engine.tasks.find((x) => x.id === num(req.params.id));
     if (!t) return fail(res, 40404, '任务不存在');
-    const inst = engine.mustInstance(t.instanceId);
+    if (t.status === 'pending' && (t.assignee === p.uid || t.candidates.includes(p.uid))) {
+      engine.tasks.update((x) => x.id === t.id, { assignee: p.uid, status: 'claimed' });
+    }
+    const task = engine.tasks.find((x) => x.id === t.id)!;
+    const inst = engine.mustInstance(task.instanceId);
     const flow = engine.flowOf(inst);
     const node = engine.nodeOf(flow, t.nodeId);
     const form = engine.formOf(inst);
@@ -309,9 +314,9 @@ export function buildRoutes(engine: WorkflowEngine): Router {
       };
     }
     ok(res, {
-      task: { id: t.id, nodeId: t.nodeId, nodeName: t.nodeName, status: t.status, assignee: t.assignee, candidates: t.candidates, parentTaskId: t.parentTaskId ?? null, isSign: Boolean(t.parentTaskId) },
+      task: { id: task.id, nodeId: task.nodeId, nodeName: task.nodeName, status: task.status, assignee: task.assignee, candidates: task.candidates, parentTaskId: task.parentTaskId ?? null, isSign: Boolean(task.parentTaskId) },
       instance: { id: inst.id, status: inst.status, progress: inst.progress, createdAt: inst.createdAt, creator: creator?.name, creatorDepartment: creator?.department, vars: inst.vars },
-      node: { id: node.id, name: node.name, actions: t.parentTaskId ? [{ code: 'approve', name: '同意' }, { code: 'reject', name: '不同意' }] : (node.actions ?? []) },
+      node: { id: node.id, name: node.name, actions: task.parentTaskId ? [{ code: 'approve', name: '同意' }, { code: 'reject', name: '不同意' }] : (node.actions ?? []) },
       nextChoose,
       form: { versionId: form.versionId, version: form.version, components: formEngine.applyAuth({ components: form.components }, nodeAuths, { data: inst.data }) },
       data: inst.data,
@@ -410,7 +415,7 @@ export function buildRoutes(engine: WorkflowEngine): Router {
         .filter((t) => t.instanceId === inst.id && t.nodeId === n.id && t.status === 'dealt' && Boolean(t.dealtAction))
         .sort((a, b) => b.id - a.id)[0];
       if (!dealt) return 'done';
-      return ['reject', 'force-reject', 'sign-reject'].includes(dealt.dealtAction!) ? 'rejected' : 'done';
+      return ['reject', 'force-reject', 'sign-reject', 'correct-reject'].includes(dealt.dealtAction!) ? 'rejected' : 'done';
     };
     // 实际走过的边：从 start 重走 routing，条件分支只标记最终求值命中的分支
     const takenKeys = new Set<string>();
@@ -458,6 +463,35 @@ export function buildRoutes(engine: WorkflowEngine): Router {
         edges: edges.map((e) => ({ ...e, taken: takenKeys.has(`${e.from}>${e.to}`) })),
       },
       currentAllowForce: inst.status === 'running' && inst.currentNodes.some((rt) => engine.nodeOf(flow, rt.nodeId).allowForce),
+      // 详情页内联审批：当前用户的待处理任务
+      myTask: (() => {
+        if (inst.status !== 'running') return undefined;
+        const t = engine.tasks.find((x) => x.instanceId === inst.id
+          && ['pending', 'claimed'].includes(x.status) && !x.parentTaskId
+          && (x.assignee === p.uid || x.candidates.includes(p.uid)));
+        if (!t) return undefined;
+        const node = engine.nodeOf(flow, t.nodeId);
+        return {
+          taskId: t.id, nodeId: t.nodeId, nodeName: t.nodeName, status: t.status,
+          actions: node.actions ?? [{ code: 'approve', name: '同意' }, { code: 'reject', name: '不同意' }],
+        };
+      })(),
+      // 自我修正：本人在该实例中给出的、且后续审批未打开/未处理的结论
+      correctable: (() => {
+        if (inst.status !== 'running') return [];
+        const idxOf = (id: string) => flow.nodes.findIndex((n) => n.id === id);
+        return engine.tasks
+          .filter((t) => t.instanceId === inst.id && t.status === 'dealt' && Boolean(t.dealtAction)
+            && t.nodeId !== 'start' && t.dealtBy === p.uid)
+          .filter((t) => !engine.tasks.filter((x) => x.instanceId === inst.id && x.nodeId !== 'start'
+            && idxOf(x.nodeId) > idxOf(t.nodeId) && (x.status === 'dealt' || x.status === 'claimed')).length)
+          .map((t) => ({
+            nodeId: t.nodeId,
+            nodeName: engine.nodeOf(flow, t.nodeId).name,
+            current: ['reject', 'force-reject', 'sign-reject', 'correct-reject'].includes(t.dealtAction!) ? 'reject' : 'approve',
+          }))
+          .filter((x, i, arr) => arr.findIndex((y) => y.nodeId === x.nodeId) === i);
+      })(),
       canExportPdf: inst.createdBy === p.uid || p.roles.includes('admin')
         || engine.tasks.filter((t) => t.instanceId === inst.id && (t.assignee === p.uid || t.candidates.includes(p.uid))).length > 0
         || engine.logs.filter((l) => l.instanceId === inst.id && l.actorUid === p.uid && !['提交', '重新提交', '撤销'].includes(l.action)).length > 0,
@@ -488,6 +522,15 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     try {
       const { action = 'approve', comment = '' } = req.body ?? {};
       const inst = engine.forceDeal(P(req), num(req.params.id), { action, comment });
+      ok(res, { instanceId: inst.id, status: inst.status, progress: inst.progress });
+    } catch (e: any) { fail(res, 50000, e.message); }
+  });
+
+  // 审批人修正自己已提交的结论（后续审批未打开/未处理时）
+  r.post('/site/instance/:id/correct', auth, (req, res) => {
+    try {
+      const { nodeId, result, comment = '' } = req.body ?? {};
+      const inst = engine.correctResult(P(req), num(req.params.id), { nodeId, result, comment });
       ok(res, { instanceId: inst.id, status: inst.status, progress: inst.progress });
     } catch (e: any) { fail(res, 50000, e.message); }
   });

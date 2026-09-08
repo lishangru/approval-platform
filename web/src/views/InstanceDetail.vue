@@ -15,6 +15,37 @@
 
     <FlowChart :nodes="d.flow.nodes" :edges="d.flow.edges" />
 
+    <!-- 内联审批：当前用户有待办时可直接审批 -->
+    <el-alert v-if="d.myTask" type="success" :closable="false" style="margin-bottom: 12px">
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+        <span>您的待办：<b>{{ d.myTask.nodeName }}</b>，可直接在此审批</span>
+        <el-input v-model="inlineComment" placeholder="审批意见" style="width: 320px" size="small" />
+        <el-button
+          v-for="a in d.myTask.actions" :key="a.code" size="small"
+          :type="a.code === 'approve' ? 'success' : a.code === 'reject' ? 'danger' : 'primary'"
+          @click="doInlineDeal(a)"
+        >{{ a.name }}</el-button>
+        <el-button size="small" link type="primary" @click="$router.push(`/deal/${d.myTask.taskId}`)">进入完整签批页</el-button>
+      </div>
+    </el-alert>
+
+    <!-- 自我修正：修改自己已提交的结论（后续审批未打开/未处理时） -->
+    <el-alert v-if="d.correctable?.length" type="warning" :closable="false" style="margin-bottom: 12px">
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+        <span>您可修正自己已提交的审批结果（后续审批未打开时）：</span>
+        <el-select v-model="correctNodeId" size="small" style="width: 220px">
+          <el-option v-for="c in d.correctable" :key="c.nodeId" :value="c.nodeId"
+            :label="`${c.nodeName}（当前：${c.current === 'approve' ? '同意' : '不同意'}）`" />
+        </el-select>
+        <el-radio-group v-model="correctResult" size="small">
+          <el-radio value="approve">改判通过</el-radio>
+          <el-radio value="reject">改判退回</el-radio>
+        </el-radio-group>
+        <el-input v-model="correctComment" placeholder="修正说明（写入审批日志）" style="width: 260px" size="small" />
+        <el-button size="small" type="warning" @click="doCorrect">提交修正</el-button>
+      </div>
+    </el-alert>
+
     <el-tabs>
       <el-tab-pane label="表单内容">
         <FormRender :components="d.form.components" :data="d.form.data" mode="readonly" />
@@ -63,9 +94,38 @@ const resubmitVisible = ref(false);
 const resubmitAssignees = ref<number[]>([]);
 const users = ref<any[]>([]);
 const draftData = reactive<Record<string, any>>({});
+const inlineComment = ref('');
+const correctNodeId = ref('');
+const correctResult = ref<'approve' | 'reject'>('reject');
+const correctComment = ref('');
 
 const atStart = computed(() => d.value?.flow?.nodes?.some((n: any) => n.id === 'start' && n.state === 'current'));
 const canForce = computed(() => Boolean(isAdmin.value && d.value?.instance?.status === 'running' && d.value?.currentAllowForce));
+
+async function doInlineDeal(action: any) {
+  const resp = await apiRaw<any>('post', `/site/task/${d.value.myTask.taskId}/deal`, {
+    comment: inlineComment.value,
+    operation: { code: action.code },
+  });
+  if (resp.e !== 0) return ElMessage.error(resp.e === 10049 ? (resp.d ?? []).map((x: any) => `${x.label}：${x.message}`).join('；') : resp.m);
+  ElMessage.success(`已执行：${action.name}`);
+  inlineComment.value = '';
+  refresh();
+}
+
+async function doCorrect() {
+  if (!correctNodeId.value) return ElMessage.warning('请选择要修正的节点');
+  if (correctComment.value.trim() === '') return ElMessage.warning('请填写修正说明');
+  const resp = await apiRaw<any>('post', `/site/instance/${route.params.id}/correct`, {
+    nodeId: correctNodeId.value,
+    result: correctResult.value,
+    comment: correctComment.value,
+  });
+  if (resp.e !== 0) return ElMessage.error(resp.m);
+  ElMessage.success('已修正');
+  correctComment.value = '';
+  refresh();
+}
 
 async function force(action: 'approve' | 'reject') {
   const tip = action === 'approve' ? '强制通过当前节点全部待办，流程将直接进入下一环节' : '强制退回将直接终结该申请（状态变为已否决）';
@@ -91,6 +151,10 @@ const refresh = async () => {
   d.value = await api('get', `/site/instance/${route.params.id}/detail`);
   Object.assign(draftData, d.value.form.data);
   users.value = await api('get', '/site/user/options');
+  if (d.value.correctable?.length && !correctNodeId.value) {
+    correctNodeId.value = d.value.correctable[0].nodeId;
+    correctResult.value = d.value.correctable[0].current === 'approve' ? 'reject' : 'approve';
+  }
   try { vars.value = await api('get', `/site/instance/${route.params.id}/variables`); } catch { /* ignore */ }
 };
 onMounted(refresh);

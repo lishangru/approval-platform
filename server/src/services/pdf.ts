@@ -75,14 +75,23 @@ export function sha256File(file: string): string {
 }
 
 const FILE_RE = /^[.\/]/; // 附件 url 形如 /uploads/xxx
-function fmtValue(v: any): { text: string; files: { name: string; url: string; hash: string }[] } {
+const fileMeta = (f: any) => {
+  const url = String(f.url ?? '');
+  const file = path.join(UPLOAD_DIR, path.basename(url));
+  return { name: String(f.name ?? path.basename(url)), url, hash: sha256File(file) };
+};
+export function fmtValue(v: any): { text: string; files: { name: string; url: string; hash: string }[] } {
   if (v === null || v === undefined || v === '') return { text: '（未填写）', files: [] };
-  if (Array.isArray(v)) return { text: v.map((x) => (typeof x === 'object' ? (x as any).name ?? JSON.stringify(x) : String(x))).join('、'), files: [] };
+  if (Array.isArray(v)) {
+    // 文件组件的值为对象数组：逐个补 名称/地址/SHA-256
+    if (v.length && typeof v[0] === 'object' && typeof v[0].url === 'string' && FILE_RE.test(v[0].url)) {
+      return { text: '', files: v.map(fileMeta) };
+    }
+    return { text: v.map((x) => (typeof x === 'object' ? (x as any).name ?? JSON.stringify(x) : String(x))).join('、'), files: [] };
+  }
   if (typeof v === 'object') {
     if (typeof v.url === 'string' && FILE_RE.test(v.url)) {
-      const file = path.join(UPLOAD_DIR, path.basename(v.url));
-      const files = [{ name: String(v.name ?? path.basename(v.url)), url: v.url, hash: sha256File(file) }];
-      return { text: '', files };
+      return { text: '', files: [fileMeta(v)] };
     }
     return { text: JSON.stringify(v), files: [] };
   }

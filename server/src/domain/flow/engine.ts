@@ -442,7 +442,61 @@ export class WorkflowEngine {
     }
   }
 
-  // ===== 管理员操作 =====
+  // ===== 审批人自我修正 =====
+  // 审批人修改自己已提交的结论（仅限本人；后续审批未进行时才可改）
+  correctResult(actor: Principal, instanceId: number, input: { nodeId: string; result: 'approve' | 'reject'; comment?: string }): Instance {
+    const inst = this.mustInstance(instanceId);
+    if (inst.status !== 'running') throw new Error('实例当前状态不可修正');
+    const flow = this.flowOf(inst);
+    const idxOf = (id: string) => flow.nodes.findIndex((n) => n.id === id);
+    const target = this.nodeOf(flow, input.nodeId);
+    if (target.kind !== 'userTask') throw new Error('只能修正审批节点的结果');
+
+    // 目标节点必须已产生过结论，且是本人给出的
+    const last = this.tasks
+      .filter((t) => t.instanceId === inst.id && t.nodeId === target.id && t.status === 'dealt' && Boolean(t.dealtAction))
+      .sort((a, b) => b.id - a.id)[0];
+    if (!last) throw new Error('该节点尚无已产生的审批结果');
+    if (last.dealtBy !== actor.uid) throw new Error('只能修正自己给出的审批结果');
+
+    // 后续审批必须尚未进行：更靠后的节点只要有"已打开（claimed）"或"已处理"的任务即锁定
+    const laterLocked = this.tasks.filter((t) => t.instanceId === inst.id && t.nodeId !== 'start'
+      && idxOf(t.nodeId) > idxOf(target.id) && (t.status === 'dealt' || t.status === 'claimed'));
+    if (laterLocked.length) throw new Error('后续审批人已打开或已处理，无法修正');
+
+    const prevApprove = !['reject', 'force-reject', 'sign-reject', 'correct-reject'].includes(last.dealtAction!);
+    const newApprove = input.result === 'approve';
+    if (prevApprove === newApprove) throw new Error('审批结果未变化，无需修正');
+
+    const actionName = newApprove ? '审批修正（改判通过）' : '审批修正（改判退回）';
+    this.writeLog({
+      instanceId: inst.id, taskId: last.id, nodeId: target.id, nodeName: target.name,
+      actorUid: actor.uid, actorName: actor.name, action: actionName,
+      comment: input.comment ?? '', attachments: [],
+      snapshot: { correctedTaskId: last.id, previous: last.dealtAction as unknown as Json, result: input.result },
+    });
+
+    if (!newApprove) {
+      // 改判退回：原"同意"作废，退回发起人修改重报
+      this.tasks.update((t) => t.id === last.id, { dealtAction: 'correct-reject' });
+      this.rejectTo(inst, target, 'start', actor, { operation: { code: 'reject' }, comment: input.comment ?? '' });
+    } else {
+      // 改判通过：撤销发起人的重报待办，从该节点按"通过"重新路由
+      this.tasks.update((t) => t.id === last.id, { dealtAction: 'correct-approve' });
+      const kept = inst.currentNodes.filter((rt) => this.nodeOf(flow, rt.nodeId).kind !== 'start');
+      for (const rt of inst.currentNodes) {
+        if (!kept.includes(rt)) {
+          for (const tid of rt.taskIds) this.tasks.update((t) => t.id === tid && t.status !== 'dealt', { status: 'cancelled', dealtAt: now() });
+          inst.history.push({ nodeId: rt.nodeId, taskIds: rt.taskIds });
+        }
+      }
+      inst.currentNodes = kept;
+      this.instances.update((i) => i.id === inst.id, { currentNodes: kept, history: inst.history, status: 'running' });
+      this.routeFrom(inst, target.id, actor, { operation: { code: 'approve' }, comment: input.comment ?? '' });
+    }
+    return this.mustInstance(inst.id);
+  }
+
   // 强制审批：对当前节点全部待办强行通过/退回（仅 allowForce=true 的节点开放）
   forceDeal(actor: Principal, instanceId: number, input: { action: 'approve' | 'reject'; comment?: string }): Instance {
     if (!actor.roles.includes('admin')) throw new Error('仅管理员可强制审批');
