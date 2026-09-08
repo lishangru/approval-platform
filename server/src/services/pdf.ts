@@ -281,11 +281,13 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
     const info = getSealInfo(l.actorUid);
     if (!info) continue;
     const userP12: Buffer<ArrayBuffer> = fs.readFileSync(sealPaths(l.actorUid).p12);
+    // 签名属性（Reason/Name）用 ASCII：部分阅读器对签名字典里的非 ASCII 字符串显示为乱码
+    // 审批人与意见的对应关系见正文"二、审批意见"与"三、文件数字签名"
     buffer = plainAddPlaceholder({
       pdfBuffer: buffer,
-      reason: `审批签名：${l.nodeName} / ${l.actorName} / ${seal.subject}`,
+      reason: `Approval signature - log #${l.id}`,
       contactInfo: 'service@approval.platform',
-      name: seal.subject,
+      name: `PersonalSeal-UID${l.actorUid}`,
       location: 'Approval Platform',
       signatureLength: 8192,
       subFilter: SUBFILTER_ADOBE_PKCS7_DETACHED,
@@ -295,9 +297,9 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
 
   buffer = plainAddPlaceholder({
     pdfBuffer: buffer,
-    reason: `申请单导出（实例 #${inst.id}）`,
+    reason: `Approval form export (instance #${inst.id})`,
     contactInfo: 'service@approval.platform',
-    name: '网上办事大厅 系统签章',
+    name: 'ApprovalPlatform-SystemSeal',
     location: 'Approval Platform',
     signatureLength: 8192,
     subFilter: SUBFILTER_ADOBE_PKCS7_DETACHED,
