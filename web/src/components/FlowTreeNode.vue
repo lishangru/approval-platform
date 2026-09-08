@@ -1,32 +1,35 @@
 <template>
-  <div class="ftn">
-    <!-- 节点本体 -->
-    <div class="fc-node" :class="['st-' + node.state, node.kind === 'start' || node.kind === 'end' ? 'pill' : 'rect']">
+  <div class="ftn" :class="{ 'ftn-untaken': isUntaken }">
+    <!-- 节点本体（未走过的路径灰显且不显示状态标签） -->
+    <div class="fc-node" :class="['st-' + (isUntaken ? 'pending' : node.state), node.kind === 'start' || node.kind === 'end' ? 'pill' : 'rect']">
       <div class="fc-node-head">
         <span class="fc-kind" :class="'k-' + node.kind">{{ kindName(node.kind) }}</span>
         <span class="fc-name">{{ node.name }}</span>
-        <el-tag v-if="node.state === 'current'" type="primary" size="small" effect="dark">进行中</el-tag>
-        <el-tag v-else-if="node.state === 'done'" type="success" size="small" effect="plain">已办结</el-tag>
-        <el-tag v-else-if="node.state === 'rejected'" type="danger" size="small" effect="plain">已退回</el-tag>
-        <el-tag v-else type="info" size="small" effect="plain">未到达</el-tag>
+        <template v-if="!isUntaken">
+          <el-tag v-if="node.state === 'current'" type="primary" size="small" effect="dark">进行中</el-tag>
+          <el-tag v-else-if="node.state === 'done'" type="success" size="small" effect="plain">已办结</el-tag>
+          <el-tag v-else-if="node.state === 'rejected'" type="danger" size="small" effect="plain">已退回</el-tag>
+        </template>
+        <el-tag v-else type="info" size="small" effect="plain">未走过</el-tag>
       </div>
-      <div v-if="node.handlers?.length" class="fc-people">
+      <div v-if="!isUntaken && node.handlers?.length" class="fc-people">
         <el-icon><User /></el-icon>
         <span>处理人：{{ node.handlers.join('、') }}</span>
       </div>
-      <div v-else-if="node.state === 'current' && node.candidates?.length" class="fc-people fc-waiting">
+      <div v-else-if="!isUntaken && node.state === 'current' && node.candidates?.length" class="fc-people fc-waiting">
         <el-icon><Clock /></el-icon>
         <span>待处理：{{ node.candidates.join('、') }}</span>
       </div>
     </div>
 
     <template v-if="children.length">
-      <div class="fc-line" :class="{ 'line-done': node.state === 'done' }"><span class="fc-arrow">▼</span></div>
+      <div class="fc-line" :class="{ 'line-done': !isUntaken && node.state === 'done' }"><span class="fc-arrow">▼</span></div>
 
       <!-- 单一后继且无条件标签：直接串联 -->
       <FlowTreeNode
         v-if="children.length === 1 && !children[0].edge.label"
         :node="children[0].node" :edges="edges" :path="[...(path ?? []), children[0].node.id]"
+        :untaken="isUntaken || children[0].edge.taken === false"
       />
 
       <!-- 多后继 / 带条件标签：网关 + 分支列 -->
@@ -35,12 +38,12 @@
           <span class="gw-icon">◇</span>
           <span>{{ gatewayName }}</span>
         </div>
-        <div class="fc-line" :class="{ 'line-done': node.state === 'done' }"><span class="fc-arrow">▼</span></div>
+        <div class="fc-line" :class="{ 'line-done': !isUntaken && node.state === 'done' }"><span class="fc-arrow">▼</span></div>
         <div class="branches">
-          <div v-for="c in children" :key="c.edge.to + (c.edge.label ?? '')" class="branch-col">
+          <div v-for="c in children" :key="c.edge.to + (c.edge.label ?? '')" class="branch-col" :class="{ 'branch-untaken': c.edge.taken === false }">
             <div v-if="c.edge.label" class="branch-label" :class="{ 'bl-else': c.edge.label === '否则' }">{{ c.edge.label }}</div>
             <div class="branch-arrow">↓</div>
-            <FlowTreeNode :node="c.node" :edges="edges" :path="[...(path ?? []), c.node.id]" />
+            <FlowTreeNode :node="c.node" :edges="edges" :path="[...(path ?? []), c.node.id]" :untaken="isUntaken || c.edge.taken === false" />
           </div>
         </div>
       </div>
@@ -54,13 +57,17 @@ import { User, Clock } from '@element-plus/icons-vue';
 
 const props = defineProps<{
   node: any;
-  edges: { from: string; to: string; label?: string }[];
+  edges: { from: string; to: string; label?: string; taken?: boolean }[];
   path?: string[];
+  untaken?: boolean;
 }>();
 
 // 全量真实节点（状态/处理人由服务端下发），占位节点按 id 解析
 const allNodes = inject<any[]>('flowNodes', []);
 const node = computed(() => allNodes.find((n) => n.id === props.node.id) ?? props.node);
+
+// 未走过：父链已灰 or 连接边被服务端判定未走过
+const isUntaken = computed(() => Boolean(props.untaken));
 
 const children = computed(() => {
   const seen = new Set(props.path ?? []);
@@ -85,6 +92,8 @@ const kindName = (k: string) => ({ start: '开始', end: '结束', userTask: '�
 
 <style scoped>
 .ftn { display: flex; flex-direction: column; align-items: center; }
+.ftn-untaken { opacity: 0.55; }
+.ftn-untaken .fc-node { border-style: dashed; background: #fff; }
 .fc-node { width: 380px; max-width: 92%; box-sizing: border-box; text-align: left; border: 1.5px solid #dcdfe6; background: #fafafa; padding: 10px 16px; }
 .fc-node.pill { border-radius: 24px; }
 .fc-node.rect { border-radius: 8px; }
@@ -110,6 +119,8 @@ const kindName = (k: string) => ({ start: '开始', end: '结束', userTask: '�
 .gw-icon { font-size: 14px; }
 .branches { display: flex; align-items: flex-start; gap: 24px; }
 .branch-col { display: flex; flex-direction: column; align-items: center; }
+.branch-untaken { opacity: 0.55; }
+.branch-untaken .branch-label { opacity: 0.6; }
 .branch-label { font-size: 11px; color: #67c23a; background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 10px; padding: 1px 10px; max-width: 240px; text-align: center; }
 .bl-else { color: #909399; background: #f4f4f5; border-color: #e9e9eb; }
 .branch-arrow { color: #c0c4cc; font-size: 12px; line-height: 14px; }

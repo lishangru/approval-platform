@@ -3,9 +3,11 @@ import crypto from 'node:crypto';
 import type { WorkflowEngine } from '../domain/flow/engine.js';
 import type { Principal, Json, FieldError } from '../core/types.js';
 import { formEngine } from '../domain/form/engine.js';
+import { evaluate } from '../domain/flow/expr.js';
 import { assigneeRegistry, inScope } from '../domain/flow/assignees.js';
 import { localAuth, authRequired, requireRole, requireTotp, hashPassword, makeSalt, signToken } from '../services/auth.js';
 import { ensureSigningP12, generateInstancePdf } from '../services/pdf.js';
+import { getSealInfo, resetSeal } from '../services/seal.js';
 import path from 'node:path';
 import { oauthConfig, createState, checkState, buildAuthorizeUrl, exchangeCode, fetchUserinfo, matchLocalUser } from '../services/oauth.js';
 import type { NextFunction } from 'express';
@@ -396,6 +398,30 @@ export function buildRoutes(engine: WorkflowEngine): Router {
       if (!dealt) return 'done';
       return ['reject', 'force-reject', 'sign-reject'].includes(dealt.dealtAction!) ? 'rejected' : 'done';
     };
+    // 实际走过的边：从 start 重走 routing，条件分支只标记最终求值命中的分支
+    const takenKeys = new Set<string>();
+    const reached = new Set<string>(['start']);
+    const walkQueue = ['start'];
+    while (walkQueue.length) {
+      const id = walkQueue.shift()!;
+      const n = engine.nodeOf(flow, id);
+      if (n.kind === 'end') continue;
+      if (nodeState(n) === 'rejected') continue;
+      // 只对真实发生过的节点标记出边（已处理或正在处理；start 必然已执行），未走到的节点不预判
+      const visited = id === 'start' || inst.history.some((h) => h.nodeId === id) || inst.currentNodes.some((c) => c.nodeId === id);
+      if (!visited) continue;
+      const r = n.routing;
+      const mark = (to: string) => { takenKeys.add(`${id}>${to}`); if (!reached.has(to)) { reached.add(to); walkQueue.push(to); } };
+      if (!r || r.kind === 'sequential') mark(r?.next ?? 'end');
+      else if (r.kind === 'parallel') for (const t of r.to ?? []) mark(t);
+      else if (r.kind === 'conditional') {
+        let matched = false;
+        for (const b of r.branches ?? []) {
+          if (evaluate(b.when, { vars: inst.vars as any, form: inst.data })) { mark(b.to); matched = true; }
+        }
+        if (!matched) mark(r.fallback ?? 'end');
+      }
+    }
     ok(res, {
       instance: { id: inst.id, name: inst.appSnapshot.name, status: inst.status, progress: inst.progress, createdAt: inst.createdAt, finishedAt: inst.finishedAt ?? null, vars: inst.vars },
       flow: {
@@ -415,7 +441,7 @@ export function buildRoutes(engine: WorkflowEngine): Router {
             candidates: waiting,
           };
         }),
-        edges,
+        edges: edges.map((e) => ({ ...e, taken: takenKeys.has(`${e.from}>${e.to}`) })),
       },
       currentAllowForce: inst.status === 'running' && inst.currentNodes.some((rt) => engine.nodeOf(flow, rt.nodeId).allowForce),
       canExportPdf: inst.createdBy === p.uid || p.roles.includes('admin')
@@ -700,6 +726,27 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     const row = engine.apikeys.find((k) => k.id === num(req.params.id));
     if (!row) return fail(res, 40404, '密钥不存在');
     engine.apikeys.remove((k) => k.id === row.id);
+    ok(res);
+  });
+
+  // ===== 个人签章（数字证书）管理 =====
+  r.get('/system/seals', (_req, res) => {
+    ok(res, engine.users.all().map((u) => {
+      const info = getSealInfo(u.id);
+      return {
+        uid: u.id, name: u.name, number: u.number, department: u.department,
+        hasSeal: Boolean(info),
+        subject: info?.subject ?? '', serial: info?.serial ?? '',
+        fingerprint: info?.fingerprint ?? '', createdAt: info?.createdAt ?? '',
+      };
+    }));
+  });
+
+  r.post('/system/seals/:uid/reset', (req, res) => {
+    const uid = num(req.params.uid);
+    const u = engine.findUser(uid);
+    if (!u) return fail(res, 40404, '用户不存在');
+    resetSeal(uid);
     ok(res);
   });
 

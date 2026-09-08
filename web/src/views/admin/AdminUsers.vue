@@ -121,6 +121,30 @@
           （Header <code>X-API-Key: ak_xxx</code>，返回 approved 是否通过 / status 状态）
         </div>
       </el-tab-pane>
+      <!-- ============ 个人签章 ============ -->
+      <el-tab-pane label="个人签章" name="seals">
+        <el-alert type="info" :closable="false" style="margin-bottom: 10px"
+          title="每个审批人首次签批时自动生成个人数字证书（PKCS#7 签名），审批日志与 PDF 申请单逐级附签。重置后，用户下次签批时会重新生成。" />
+        <el-table :data="seals" border>
+          <el-table-column prop="name" label="姓名" width="100" />
+          <el-table-column prop="number" label="学工号" width="110" />
+          <el-table-column label="签章状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.hasSeal ? 'success' : 'info'" size="small">{{ row.hasSeal ? '已生成' : '未生成' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="subject" label="证书主体" min-width="240" />
+          <el-table-column label="证书指纹" min-width="200">
+            <template #default="{ row }"><code>{{ row.fingerprint ? row.fingerprint.slice(0, 24) + '…' : '—' }}</code></template>
+          </el-table-column>
+          <el-table-column prop="createdAt" label="生成时间" width="170" />
+          <el-table-column label="操作" width="110" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" type="warning" plain :disabled="!row.hasSeal" @click="resetSeal(row)">重置签章</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
     </el-tabs>
 
     <!-- 用户弹窗 -->
@@ -169,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { api } from '../../api';
 
@@ -290,6 +314,24 @@ async function saveDept(row: any) {
   ElMessage.success('已重命名（用户部门名同步更新）');
   refresh();
 }
+
+// ---- 个人签章 ----
+const seals = ref<any[]>([]);
+
+async function loadSeals() {
+  seals.value = await api('get', '/system/seals');
+}
+
+async function resetSeal(row: any) {
+  await ElMessageBox.confirm(
+    `确定重置「${row.name}」的个人签章？已产生的审批签名仍有效，但后续签批将使用新证书。`, '重置签章', { type: 'warning' },
+  );
+  await api('post', `/system/seals/${row.uid}/reset`);
+  ElMessage.success('签章已重置');
+  loadSeals();
+}
+
+watch(tab, (t) => { if (t === 'seals') loadSeals(); });
 
 // ---- API 密钥 ----
 const newKeyName = ref('');

@@ -8,6 +8,7 @@ import { formEngine } from '../form/engine.js';
 import { assigneeRegistry, type AssigneeCtx } from './assignees.js';
 import { routingRegistry } from './routing.js';
 import { actionRegistry, type DealInput } from './actions.js';
+import { ensureSeal, getSealInfo, signWithSeal } from '../../services/seal.js';
 
 export interface UserRow {
   id: number; username: string; passHash: string; salt: string;
@@ -254,6 +255,7 @@ export class WorkflowEngine {
     if (!['pending', 'claimed'].includes(task.status)) throw new Error('任务当前状态不可处理');
     const canDeal = task.assignee === actor.uid || task.candidates.includes(actor.uid) || actor.roles.includes('admin');
     if (!canDeal) throw new Error('无权处理该任务');
+    const logWatermark = this.logs.all().reduce((m, l) => Math.max(m, l.id), 0);
 
     // —— 加签子任务：处理后归还主任务 ——
     if (task.parentTaskId) {
@@ -276,6 +278,7 @@ export class WorkflowEngine {
           anyReject ? `任务「${parent.nodeName}」的加签人中有人不同意，请谨慎处理` : `任务「${parent.nodeName}」的加签人已全部处理，请继续处理`,
           parent.instanceId, parent.id);
       }
+      this.stampSealsSince(logWatermark, actor.uid);
       bus.emitEvent({ type: 'TaskDealt', instanceId: task.instanceId, taskId: task.id, nodeId: task.nodeId, action: 'sign', actorUid: actor.uid, actorName: actor.name });
       return { instance: this.mustInstance(task.instanceId), task: this.tasks.find((t) => t.id === task.id)! };
     }
@@ -319,6 +322,8 @@ export class WorkflowEngine {
       });
       const siblings = this.tasks.filter((t) => rt.taskIds.includes(t.id));
       if (!siblings.every((s) => s.status === 'dealt')) {
+        // 会签未齐：本次先处理到这里
+        this.stampSealsSince(logWatermark, actor.uid);
         bus.emitEvent({ type: 'TaskDealt', instanceId: instance.id, taskId: task.id, nodeId: node.id, action: input.operation.code, actorUid: actor.uid, actorName: actor.name });
         return { instance, task: this.tasks.find((t) => t.id === task.id)! };
       }
@@ -366,8 +371,31 @@ export class WorkflowEngine {
         attachments: [], snapshot: { reader: input.reader },
       });
     }
+    this.stampSealsSince(logWatermark, actor.uid);
     bus.emitEvent({ type: 'TaskDealt', instanceId: instance.id, taskId: task.id, nodeId: node.id, action: input.operation.code, actorUid: actor.uid, actorName: actor.name });
     return { instance: this.mustInstance(instance.id), task: this.tasks.find((t) => t.id === task.id)! };
+  }
+
+  // 对本次 deal 产生的审批日志加盖处理人个人签章（防抵赖）
+  private stampSealsSince(watermark: number, actorUid: number) {
+    const stampable = this.logs
+      .filter((l) => l.id > watermark && l.actorUid === actorUid && !['知会', '催办'].includes(l.action));
+    for (const log of stampable) {
+      try {
+        const content = JSON.stringify({
+          instanceId: log.instanceId, taskId: log.taskId, nodeId: log.nodeId, nodeName: log.nodeName,
+          action: log.action, comment: log.comment, attachments: log.attachments, createdAt: log.createdAt,
+        });
+        const u = this.users.all().find((x) => x.id === actorUid);
+        if (u && !getSealInfo(actorUid)) ensureSeal(u.name, u.number, actorUid);
+        const seal = signWithSeal(actorUid, content);
+        if (seal) {
+          this.logs.update((l) => l.id === log.id, { snapshot: { ...(log.snapshot ?? {}), seal: seal as unknown as Json } as Json });
+        }
+      } catch (err) {
+        console.error('[seal] 盖章失败（不影响审批）:', (err as Error).message);
+      }
+    }
   }
 
   private checkDealInput(input: DealInput, actionSpec: { opinionRequired?: boolean; attachmentRequired?: boolean } | null): Error | null {

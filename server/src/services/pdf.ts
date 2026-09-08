@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 import forge from 'node-forge';
 import { PDFDocument, rgb } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { pdflibAddPlaceholder } from '@signpdf/placeholder-pdf-lib';
+import { plainAddPlaceholder } from '@signpdf/placeholder-plain';
 import { SignPdf } from '@signpdf/signpdf';
 import { P12Signer } from '@signpdf/signer-p12';
 import { SUBFILTER_ADOBE_PKCS7_DETACHED } from '@signpdf/utils';
-import type { WorkflowEngine, UserRow } from '../domain/flow/engine.js';
+import { evaluate } from '../domain/flow/expr.js';
+import { sealPaths, getSealInfo } from './seal.js';
+import type { WorkflowEngine } from '../domain/flow/engine.js';
 import type { Instance } from '../core/types.js';
 
 const SIGN_PASS = process.env.PDF_SIGN_PASS || 'approval-seal-2026';
@@ -169,11 +171,12 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
   drawTable(['项目', '内容'], [110, CONTENT_W - 110], meta.map(([k, v]) => ({ lines: [cell(k, 110), cell(v, CONTENT_W - 110)] })));
   y -= 16;
 
-  // —— 表单内容 ——
+  // —— 表单内容（按条件显隐过滤：被联动隐藏的字段不出现在申请单上）——
   draw('一、表单内容', M, 11);
   y -= 6;
   const form = engine.formOf(inst);
-  const formRows = form.components.map((c) => {
+  const visibleComponents = form.components.filter((c) => !c.visibleIf || Boolean(evaluate(c.visibleIf, { vars: inst.vars as any, form: inst.data })));
+  const formRows = visibleComponents.map((c) => {
     const { text, files } = fmtValue(inst.data[c.key]);
     let t = text;
     if (files.length) {
@@ -184,21 +187,27 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
   drawTable(['字段', '填写内容'], [130, CONTENT_W - 130], formRows);
   y -= 16;
 
-  // —— 审批意见（一级一行）——
+  // —— 审批意见（一级一行，时间 hh:mm:ss 换行显示）——
   draw('二、审批意见', M, 11);
   y -= 6;
   const opinionLogs = engine.logs
     .filter((l) => l.instanceId === inst.id && !['提交', '重新提交', '撤销', '催办', '知会'].includes(l.action))
     .sort((a, b) => a.id - b.id);
+  const splitTime = (t: string) => {
+    const [d, tm] = t.split(' ');
+    return d + '\n' + (tm ?? '');
+  };
   const opinionRows = opinionLogs.map((l) => {
     let text = l.comment || '（无意见）';
     if (l.attachments?.length) {
       text += '\n' + l.attachments.map((a: any) => {
-        const file = path.join(process.cwd(), '..', 'uploads', path.basename(String(a.url ?? '')));
+        const file = path.join(UPLOAD_DIR, path.basename(String(a.url ?? '')));
         return `附件：${a.name}（下载地址：${a.url}，SHA-256：${sha256File(file)}）`;
       }).join('\n');
     }
-    return { lines: [cell(l.nodeName, 90), cell(l.actorName, 70), cell(l.action, 70), cell(text, CONTENT_W - 90 - 70 - 70 - 80), cell(l.createdAt, 80)] };
+    const seal = (l.snapshot as any)?.seal as any;
+    if (seal?.fingerprint) text += `\n个人签章：${seal.subject}（证书指纹 ${String(seal.fingerprint).slice(0, 16)}…，已验签）`;
+    return { lines: [cell(l.nodeName, 90), cell(l.actorName, 70), cell(l.action, 70), cell(text, CONTENT_W - 90 - 70 - 70 - 80), cell(splitTime(l.createdAt), 80)] };
   });
   drawTable(['节点', '处理人', '操作', '意见/附件', '时间'], [90, 70, 70, CONTENT_W - 90 - 70 - 70 - 80, 80], opinionRows.length ? opinionRows : [{ lines: [cell('—', 90), cell('—', 70), cell('—', 70), cell('尚无审批记录', CONTENT_W - 310), cell('—', 80)] }]);
   y -= 20;
@@ -207,20 +216,47 @@ export async function generateInstancePdf(engine: WorkflowEngine, inst: Instance
   newPageIfNeeded(40);
   draw('三、文件数字签名', M, 11);
   y -= 4;
-  draw('本 PDF 已由系统证书进行 PKCS#7 数字签名（PAdES 兼容域），在 Adobe Acrobat 等阅读器中验证签名有效即可确认文件未被篡改。', M, 9);
+  const sealedLogs = opinionLogs.filter((l) => (l.snapshot as any)?.seal?.fingerprint);
+  draw(
+    `本 PDF 采用逐级数字签名链：每个处理人的个人签章（共 ${sealedLogs.length} 枚）依次对文件进行 PKCS#7 数字签名，最后由系统证书封口。` +
+    '在 Adobe Acrobat 等阅读器中可查看全部签名，任一签名验证有效即表明其覆盖范围内的内容未被篡改，并可与审批人一一对应，防止抵赖。',
+    M, 9
+  );
+  y -= 4;
+  for (const l of sealedLogs) {
+    const seal = (l.snapshot as any).seal;
+    draw(`已签名：${seal.subject}（时间 ${seal.signedAt}，指纹 ${String(seal.fingerprint).slice(0, 16)}…）`, M + 10, 9);
+  }
 
-  // —— 占位并签名 ——
+  // —— 签名链：逐级叠加个人签章（先处理人的先签），系统签章最后封口 ——
+  const signer = new SignPdf();
   const p12Cert = new P12Signer(p12, { passphrase: SIGN_PASS });
-  pdflibAddPlaceholder({
-    pdfDoc,
+  let buffer: Buffer<ArrayBuffer> = Buffer.from(await pdfDoc.save({ useObjectStreams: false }));
+  for (const l of sealedLogs) {
+    const seal = (l.snapshot as any).seal as { subject: string; signedAt: string };
+    const info = getSealInfo(l.actorUid);
+    if (!info) continue;
+    const userP12: Buffer<ArrayBuffer> = fs.readFileSync(sealPaths(l.actorUid).p12);
+    buffer = plainAddPlaceholder({
+      pdfBuffer: buffer,
+      reason: `审批签名：${l.nodeName} / ${l.actorName} / ${seal.subject}`,
+      contactInfo: 'service@approval.platform',
+      name: seal.subject,
+      location: 'Approval Platform',
+      signatureLength: 8192,
+      subFilter: SUBFILTER_ADOBE_PKCS7_DETACHED,
+    }) as Buffer<ArrayBuffer>;
+    buffer = (await signer.sign(buffer, new P12Signer(userP12, { passphrase: info.passphrase }))) as Buffer<ArrayBuffer>;
+  }
+
+  buffer = plainAddPlaceholder({
+    pdfBuffer: buffer,
     reason: `申请单导出（实例 #${inst.id}）`,
     contactInfo: 'service@approval.platform',
     name: '网上办事大厅 系统签章',
     location: 'Approval Platform',
     signatureLength: 8192,
     subFilter: SUBFILTER_ADOBE_PKCS7_DETACHED,
-    widgetRect: [PAGE_W - 180, 30, PAGE_W - 30, 80],
-  });
-  const buffer = await pdfDoc.save();
-  return new SignPdf().sign(Buffer.from(buffer), p12Cert);
+  }) as Buffer<ArrayBuffer>;
+  return signer.sign(buffer, p12Cert);
 }
