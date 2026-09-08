@@ -380,22 +380,32 @@ export class WorkflowEngine {
   private stampSealsSince(watermark: number, actorUid: number) {
     const stampable = this.logs
       .filter((l) => l.id > watermark && l.actorUid === actorUid && !['知会', '催办'].includes(l.action));
-    for (const log of stampable) {
-      try {
-        const content = JSON.stringify({
-          instanceId: log.instanceId, taskId: log.taskId, nodeId: log.nodeId, nodeName: log.nodeName,
-          action: log.action, comment: log.comment, attachments: log.attachments, createdAt: log.createdAt,
-        });
-        const u = this.users.all().find((x) => x.id === actorUid);
-        if (u && !getSealInfo(actorUid)) ensureSeal(u.name, u.number, actorUid);
-        const seal = signWithSeal(actorUid, content);
-        if (seal) {
-          this.logs.update((l) => l.id === log.id, { snapshot: { ...(log.snapshot ?? {}), seal: seal as unknown as Json } as Json });
-        }
-      } catch (err) {
-        console.error('[seal] 盖章失败（不影响审批）:', (err as Error).message);
+    for (const log of stampable) this.stampLog(log);
+  }
+
+  // 给单条审批日志盖章（幂等：已有签章则跳过）
+  stampLog(log: ApprovalLog) {
+    try {
+      const content = JSON.stringify({
+        instanceId: log.instanceId, taskId: log.taskId, nodeId: log.nodeId, nodeName: log.nodeName,
+        action: log.action, comment: log.comment, attachments: log.attachments, createdAt: log.createdAt,
+      });
+      const u = this.users.all().find((x) => x.id === log.actorUid);
+      if (!u) return;
+      if (!getSealInfo(log.actorUid)) ensureSeal(u.name, u.number, log.actorUid);
+      const seal = signWithSeal(log.actorUid, content);
+      if (seal) {
+        this.logs.update((l) => l.id === log.id, { snapshot: { ...(log.snapshot ?? {}), seal: seal as unknown as Json } as Json });
       }
+    } catch (err) {
+      console.error('[seal] 盖章失败（不影响审批）:', (err as Error).message);
     }
+  }
+
+  // 补签：为实例中缺签章的审批日志补盖签章（导出 PDF 前调用）
+  ensureInstanceSeals(instanceId: number) {
+    const unstamped = this.logs.filter((l) => l.instanceId === instanceId && !(l.snapshot as any)?.seal && !['知会', '催办'].includes(l.action));
+    for (const log of unstamped) this.stampLog(log);
   }
 
   private checkDealInput(input: DealInput, actionSpec: { opinionRequired?: boolean; attachmentRequired?: boolean } | null): Error | null {

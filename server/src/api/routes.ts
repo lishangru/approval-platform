@@ -489,6 +489,8 @@ export function buildRoutes(engine: WorkflowEngine): Router {
         || engine.logs.filter((l) => l.instanceId === inst.id && l.actorUid === p.uid && !['提交', '重新提交', '撤销'].includes(l.action)).length > 0;
       if (!isOwner && !isAdmin && !isAuditor) return fail(res, 40300, '无权导出该申请单（需发起人/审批员/管理员）');
       const p12 = ensureSigningP12(path.join(process.cwd(), 'data'));
+      // 导出前补签：历史日志若缺个人签章（未签或盖章失败）则补盖
+      engine.ensureInstanceSeals(inst.id);
       generateInstancePdf(engine, inst, p12).then((buf) => {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(`申请单-${inst.appSnapshot.name}-#${inst.id}.pdf`)}`);
