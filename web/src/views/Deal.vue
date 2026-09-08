@@ -38,7 +38,12 @@
       </el-form-item>
 
       <el-form-item v-if="d.nextChoose" label="指定下一环节审批人" required>
-        <UserMultiSelect v-model="nextAssignees" :users="d.nextChoose.candidates" :placeholder="`选择「${d.nextChoose.nodeName}」审批人`" />
+        <div style="width: 100%">
+          <UserMultiSelect v-model="nextAssignees" :users="d.nextChoose.candidates" :placeholder="`选择「${d.nextChoose.nodeName}」审批人`" />
+          <div v-if="defaultSelectedNames.length" class="chosen-hint">
+            发起人指定：<b>{{ defaultSelectedNames.join('、') }}</b>（已默认带入，如需调整可修改）
+          </div>
+        </div>
       </el-form-item>
 
       <el-form-item label="知会">
@@ -100,8 +105,14 @@ onMounted(async () => {
   Object.assign(original, d.value.data);
   Object.assign(data, JSON.parse(JSON.stringify(d.value.data)));
   action.value = d.value.node.actions[0]?.code ?? '';
+  // 发起人指定的人选默认带入（预审人可见、可修改）
+  nextAssignees.value = d.value.nextChoose?.selected ?? [];
   users.value = await api('get', '/site/user/options');
 });
+
+const defaultSelectedNames = computed(() =>
+  (d.value?.nextChoose?.candidates ?? []).filter((c: any) => (d.value?.nextChoose?.selected ?? []).includes(c.id)).map((c: any) => c.name),
+);
 
 async function submit() {
   if (d.value.nextChoose && !nextAssignees.value.length) return ElMessage.warning(`请指定「${d.value.nextChoose.nodeName}」的审批人`);
@@ -137,3 +148,7 @@ async function submit() {
   }
 }
 </script>
+
+<style scoped>
+.chosen-hint { margin-top: 6px; font-size: 12px; color: #e6a23c; background: #fdf6ec; display: inline-block; padding: 3px 10px; border-radius: 4px; }
+</style>

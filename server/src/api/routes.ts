@@ -267,15 +267,22 @@ export function buildRoutes(engine: WorkflowEngine): Router {
     const form = engine.formOf(inst);
     const nodeAuths = node.auths?.[String(inst.formVersionId)] ?? {};
     const creator = engine.findUser(inst.createdBy);
-    // 下一环节若是"发起人指定"（沿链探测），下发候选人范围（供签批页指定下一环节审批人）
-    let nextChoose: { nodeId: string; nodeName: string; candidates: { id: number; name: string; department: string }[] } | null = null;
+    // 下一环节若是"发起人指定"（沿链探测），下发候选人范围 + 发起人已暂存的人选（预审人可见、默认带入、可修改）
+    let nextChoose: { nodeId: string; nodeName: string; candidates: { id: number; name: string; department: string }[]; selected: number[] } | null = null;
     const chooseNode = findChooseNode(flow.nodes, node.id);
     if (chooseNode) {
+      const scope = chooseNode.assignee!.scope;
+      const selected = (inst.pendingChoice ?? [])
+        .map((uid) => engine.findUser(uid))
+        .filter((p): p is Principal => Boolean(p) && inScope({ id: p!.uid, roles: p!.roles, group: p!.group, departmentId: p!.departmentId }, scope))
+        .map((p) => p.uid);
       nextChoose = {
         nodeId: chooseNode.id, nodeName: chooseNode.name,
         candidates: engine.users.all()
-          .filter((u) => inScope({ id: u.id, roles: u.roles, group: u.group, departmentId: u.departmentId }, chooseNode.assignee!.scope))
+          .filter((u) => u.status !== 'disabled')
+          .filter((u) => inScope({ id: u.id, roles: u.roles, group: u.group, departmentId: u.departmentId }, scope))
           .map((u) => ({ id: u.id, name: u.name, department: u.department })),
+        selected,
       };
     }
     ok(res, {
