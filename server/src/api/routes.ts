@@ -5,6 +5,8 @@ import type { Principal, Json, FieldError } from '../core/types.js';
 import { formEngine } from '../domain/form/engine.js';
 import { assigneeRegistry, inScope } from '../domain/flow/assignees.js';
 import { localAuth, authRequired, requireRole, requireTotp, hashPassword, makeSalt, signToken } from '../services/auth.js';
+import { ensureSigningP12, generateInstancePdf } from '../services/pdf.js';
+import path from 'node:path';
 import { oauthConfig, createState, checkState, buildAuthorizeUrl, exchangeCode, fetchUserinfo, matchLocalUser } from '../services/oauth.js';
 import type { NextFunction } from 'express';
 
@@ -416,6 +418,9 @@ export function buildRoutes(engine: WorkflowEngine): Router {
         edges,
       },
       currentAllowForce: inst.status === 'running' && inst.currentNodes.some((rt) => engine.nodeOf(flow, rt.nodeId).allowForce),
+      canExportPdf: inst.createdBy === p.uid || p.roles.includes('admin')
+        || engine.tasks.filter((t) => t.instanceId === inst.id && (t.assignee === p.uid || t.candidates.includes(p.uid))).length > 0
+        || engine.logs.filter((l) => l.instanceId === inst.id && l.actorUid === p.uid && !['提交', '重新提交', '撤销'].includes(l.action)).length > 0,
       nextChoose: Boolean(findChooseNode(flow.nodes, 'start')),
       nextCandidates: (() => {
         const cn = findChooseNode(flow.nodes, 'start');
@@ -445,6 +450,27 @@ export function buildRoutes(engine: WorkflowEngine): Router {
       const inst = engine.forceDeal(P(req), num(req.params.id), { action, comment });
       ok(res, { instanceId: inst.id, status: inst.status, progress: inst.progress });
     } catch (e: any) { fail(res, 50000, e.message); }
+  });
+
+  // 申请单 PDF 导出（发起人/审批员/管理员）
+  r.get('/site/instance/:id/pdf', (req, res) => {
+    try {
+      const p = P(req);
+      const inst = engine.mustInstance(num(req.params.id));
+      const isOwner = inst.createdBy === p.uid;
+      const isAdmin = p.roles.includes('admin');
+      const isAuditor = engine.tasks.filter((t) => t.instanceId === inst.id && (t.assignee === p.uid || t.candidates.includes(p.uid))).length > 0
+        || engine.logs.filter((l) => l.instanceId === inst.id && l.actorUid === p.uid && !['提交', '重新提交', '撤销'].includes(l.action)).length > 0;
+      if (!isOwner && !isAdmin && !isAuditor) return fail(res, 40300, '无权导出该申请单（需发起人/审批员/管理员）');
+      const p12 = ensureSigningP12(path.join(process.cwd(), 'data'));
+      generateInstancePdf(engine, inst, p12).then((buf) => {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(`申请单-${inst.appSnapshot.name}-#${inst.id}.pdf`)}`);
+        res.send(buf);
+      }).catch((e: any) => fail(res, 50000, 'PDF 生成失败: ' + e.message));
+    } catch (e: any) {
+      fail(res, 50000, e.message);
+    }
   });
 
   // 管理员更换审批人

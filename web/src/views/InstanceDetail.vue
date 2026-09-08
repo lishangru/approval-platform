@@ -5,6 +5,7 @@
       <div>
         <el-tag :type="statusType(d.instance.status)" size="large">{{ statusName(d.instance.status) }}</el-tag>
         <el-button v-if="atStart" type="warning" style="margin-left: 10px" @click="resubmitVisible = true">修改并重新提交</el-button>
+        <el-button v-if="d.canExportPdf" type="info" plain style="margin-left: 10px" @click="exportPdf">下载申请单 PDF</el-button>
         <template v-if="canForce">
           <el-button type="success" style="margin-left: 10px" @click="force('approve')">强制通过</el-button>
           <el-button type="danger" @click="force('reject')">强制退回</el-button>
@@ -76,6 +77,11 @@ async function force(action: 'approve' | 'reject') {
   if (resp.e !== 0) return ElMessage.error(resp.m);
   ElMessage.success(action === 'approve' ? '已强制通过' : '已强制退回');
   refresh();
+}
+
+function exportPdf() {
+  const token = localStorage.getItem('token');
+  window.open(`/site/instance/${route.params.id}/pdf?token=${encodeURIComponent(token ?? '')}`);
 }
 const editableComponents = computed(() =>
   (d.value?.form?.components ?? []).map((c: any) => ({ ...c, auth: c.auth === 'forbidden' ? 'forbidden' : 'writable' })),
