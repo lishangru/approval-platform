@@ -19,6 +19,13 @@
       <el-form-item label="审批意见">
         <el-input v-model="comment" type="textarea" :rows="3" placeholder="填写审批意见（必填项操作会强制校验）" style="max-width: 560px" />
       </el-form-item>
+      <el-form-item label="附件">
+        <div>
+          <el-upload :file-list="attachList" :http-request="uploadAttach" :on-remove="removeAttach" multiple>
+            <el-button>📎 上传附件</el-button>
+          </el-upload>
+        </div>
+      </el-form-item>
 
       <el-form-item v-if="action === 'delegate'" label="选择代处理人" required>
         <el-select v-model="delegateUid" filterable placeholder="选择转办对象" style="width: 320px">
@@ -66,7 +73,25 @@ const delegateUid = ref<number>();
 const signUids = ref<number[]>([]);
 const nextAssignees = ref<number[]>([]);
 const readers = ref<number[]>([]);
+const attachments = ref<any[]>([]);
 const submitting = ref(false);
+
+const attachList = computed(() => attachments.value.map((f, i) => ({ name: f.name, uid: i })));
+async function uploadAttach(opt: any) {
+  try {
+    const fd = new FormData();
+    fd.append('file', opt.file);
+    const r = await api('post', '/api/upload', fd);
+    attachments.value.push(r);
+    opt.onSuccess(r);
+  } catch (e: any) {
+    ElMessage.error('上传失败：' + e.message);
+    opt.onError(e);
+  }
+}
+function removeAttach(f: any) {
+  attachments.value.splice(Number(f.uid), 1);
+}
 
 const isSign = computed(() => Boolean(d.value?.task?.isSign));
 
@@ -96,6 +121,7 @@ async function submit() {
     const resp = await apiRaw<{ instanceId: number }>('post', `/site/task/${route.params.taskId}/deal`, {
       operation: { code: action.value, param },
       comment: comment.value,
+      attachments: attachments.value,
       reader: readers.value,
       data: changed,
       next: nextAssignees.value.length ? { assignees: nextAssignees.value } : undefined,

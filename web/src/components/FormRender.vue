@@ -8,7 +8,10 @@
       >
         <!-- 只读展示 -->
         <template v-if="!editable(c)">
-          <span class="ro-value">{{ display(c, data[c.key]) }}</span>
+          <span v-if="c.type === 'file' && Array.isArray(data[c.key]) && data[c.key].length" class="file-links">
+            <a v-for="(f, fi) in data[c.key]" :key="fi" :href="f.url" target="_blank">📎 {{ f.name }}</a>
+          </span>
+          <span v-else class="ro-value">{{ display(c, data[c.key]) }}</span>
         </template>
         <!-- 可编辑 -->
         <template v-else>
@@ -53,6 +56,19 @@
             </div>
             <el-button size="small" @click="arrVal(c).push('')">+ 添加一项</el-button>
           </div>
+          <el-upload
+            v-else-if="c.type === 'file'"
+            :file-list="fileList(c)"
+            :http-request="(o: any) => doUpload(c, o)"
+            :on-remove="(f: any) => removeFile(c, f)"
+            :before-upload="(f: any) => beforeUpload(c, f)"
+            multiple
+          >
+            <el-button>📎 点击上传</el-button>
+            <template #tip>
+              <div class="upload-tip">单个不超过 20MB{{ c.props?.maxCount ? `，最多 ${c.props.maxCount} 个` : '' }}</div>
+            </template>
+          </el-upload>
           <el-input v-else v-model="data[c.key]" placeholder="暂不支持的组件类型，按文本处理" />
         </template>
       </el-form-item>
@@ -62,6 +78,9 @@
 </template>
 
 <script setup lang="ts">
+import { ElMessage } from 'element-plus';
+import { api } from '../api';
+
 const props = defineProps<{
   components: { type: string; key: string; label: string; props: any; visibleIf?: any; auth: string; visible?: boolean }[];
   data: Record<string, any>;
@@ -69,9 +88,10 @@ const props = defineProps<{
 }>();
 
 function isVisible(c: any): boolean {
+  // 有联动条件的一律动态求值（服务端 visible 是按请求时刻数据算的，不可信）
+  if (c.visibleIf) return evalExpr(c.visibleIf);
   if (c.visible === false) return false;
-  if (!c.visibleIf) return true;
-  return evalExpr(c.visibleIf);
+  return true;
 }
 function isRequired(c: any): boolean {
   return c.auth === 'require' || c.props?.required === true;
@@ -93,9 +113,46 @@ function display(c: any, v: any): string {
     const o = opts(c).find((x) => String(x.value) === String(v));
     return o ? o.name : String(v);
   }
+  if (c.type === 'file' && Array.isArray(v)) return v.map((f: any) => f.name).join('、') || '（未上传）';
   if (Array.isArray(v)) return v.join('、');
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
+}
+
+// ---- 附件上传 ----
+function fileList(c: any) {
+  const v = props.data[c.key];
+  return (Array.isArray(v) ? v : v ? [v] : []).map((f: any, i: number) => ({ name: f.name, uid: i, url: f.url }));
+}
+async function doUpload(c: any, opt: any) {
+  try {
+    const fd = new FormData();
+    fd.append('file', opt.file);
+    const r = await api('post', '/api/upload', fd);
+    if (!Array.isArray(props.data[c.key])) props.data[c.key] = [];
+    props.data[c.key].push(r);
+    opt.onSuccess(r);
+  } catch (e: any) {
+    ElMessage.error('上传失败：' + (e.message ?? ''));
+    opt.onError(e);
+  }
+}
+function removeFile(c: any, f: any) {
+  const arr = props.data[c.key];
+  if (Array.isArray(arr)) arr.splice(Number(f.uid), 1);
+}
+function beforeUpload(c: any, file: any) {
+  const max = Number(c.props?.maxCount ?? 0);
+  const arr = props.data[c.key];
+  if (max && Array.isArray(arr) && arr.length >= max) {
+    ElMessage.warning(`最多上传 ${max} 个文件`);
+    return false;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    ElMessage.warning('单个文件不超过 20MB');
+    return false;
+  }
+  return true;
 }
 
 // 与后端 expr.ts 同构的轻量求值器（显隐联动）
@@ -125,4 +182,7 @@ function evalExpr(expr: any): boolean {
 
 <style scoped>
 .ro-value { color: #303133; font-size: 14px; }
+.upload-tip { color: #909399; font-size: 12px; margin-top: 4px; }
+.file-links { display: flex; flex-direction: column; gap: 4px; }
+.file-links a { color: #409eff; text-decoration: none; font-size: 13px; }
 </style>

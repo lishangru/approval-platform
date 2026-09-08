@@ -71,7 +71,7 @@
                   <el-input disabled placeholder="选项 1" /><el-input disabled placeholder="选项 2" />
                 </div>
                 <div v-else-if="c.type === 'userPicker'" class="ghost-box">👤 人员选择控件</div>
-                <div v-else-if="c.type === 'file'" class="ghost-box">📎 附件上传控件</div>
+                <div v-else-if="c.type === 'file'" class="ghost-box">📎 附件上传控件{{ c.props?.maxCount ? `（最多 ${c.props.maxCount} 个）` : '' }}</div>
                 <el-input v-else :placeholder="c.props?.placeholder || '未知类型，按文本处理'" disabled />
               </div>
             </div>
