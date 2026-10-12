@@ -1,6 +1,6 @@
 # 审批平台（approval-platform）
 
-参照南航网上办事大厅（ehall3）逆向研究设计的完整审批流平台。
+设计的完整审批流平台。
 **Node.js 25 + TypeScript + Express + Vue3 + Element Plus**，JSON 文件存储（Repository 抽象，可换 PG/Prisma）。
 
 ## 启动
